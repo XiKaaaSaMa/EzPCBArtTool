@@ -356,9 +356,9 @@ def subject_mask(
             base, max_thickness=max(1, int(round(3 * scale)))
         )
 
-    base = cv2.morphologyEx(
-        base, cv2.MORPH_CLOSE, _ellipse(_adaptive_gap(base))
-    )
+    gap = _adaptive_gap(base)
+    if gap is not None:
+        base = cv2.morphologyEx(base, cv2.MORPH_CLOSE, _ellipse(gap))
 
     if fill:
         filled = _fill_enclosed_holes(base)
@@ -385,8 +385,14 @@ def subject_mask(
     # two pieces of 289k and 35k pixels to a single 343k blob, and the board
     # outline then ran through the space between them. Smoothing one piece at a
     # time cannot do that -- there is nothing else in the picture to merge with.
+    #
+    # **And the kernel is clamped to what each piece can survive.** A filter
+    # wider than a shape is thick does not smooth that shape, it eats it: the
+    # full-size 13 px kernel broke the hyphen in 一步 (11 px tall, 7 px to its
+    # centre line) into two fragments, and the area floor then discarded both.
+    # A glyph-sized piece is exactly the kind of thing a picture is full of.
     smooth = _odd(max(3, int(min(height, width) * 0.015)))
-    subject = _smooth_each_component(subject, _ellipse(smooth))
+    subject = _smooth_each_component(subject, smooth)
     subject = _outer_components(subject)
     if subject is None:
         return None
@@ -637,6 +643,11 @@ MULTI_ELEMENT_GAP_RATIO = 0.006
 #: leak straight out through them.
 BRIDGE_GAP_RATIO = 0.045
 
+#: How much of a piece's own thickness the smoothing kernel may use. Below 1.0
+#: so the filter tidies an edge instead of eating into the shape; measured at
+#: 0.6, which kept every glyph whole and 94% of each one's pixels.
+SMOOTH_KERNEL_SHARE = 0.6
+
 #: How much of the wide-kernel result the narrow one has to reproduce before
 #: the picture is taken to be self-closing. Measured: pictures whose outlines
 #: close score 0.94-0.99, hand-drawn line art with real gaps scores 0.58-0.72.
@@ -670,7 +681,16 @@ def _adaptive_gap(mask: np.ndarray) -> int:
     the narrow fill leaks out and the two results diverge sharply (58-72%),
     and the wide kernel is needed.
 
-    Returns an odd kernel width in pixels.
+    A self-closing picture gets ``None`` -- no closing at all. There is nothing
+    for the operation to do there, and doing it anyway is not free: closing
+    welds together strokes that merely pass near each other, which on the
+    poster this protects merged the letter O of 哒哒哒 into the character
+    beside it, losing the letter's own outline. A picture can only get ``None``
+    here if its own connected blocks already tell the whole story, which is
+    exactly the "one colour block, one element" reading a picture with closed
+    outlines wants.
+
+    Returns an odd kernel width in pixels, or ``None`` when none is needed.
     """
     import cv2
     import numpy as np
@@ -694,10 +714,12 @@ def _adaptive_gap(mask: np.ndarray) -> int:
         return wide
 
     covered = int(np.logical_and(narrow_fill, wide_fill).sum()) / wide_area
-    return narrow if covered >= SELF_CLOSING_COVERAGE else wide
+    return None if covered >= SELF_CLOSING_COVERAGE else wide
 
 
-def _smooth_each_component(mask: np.ndarray, kernel: "np.ndarray") -> np.ndarray:
+def _smooth_each_component(
+    mask: np.ndarray, max_kernel: int
+) -> np.ndarray:
     """Morphological open-then-close, applied to every piece separately.
 
     Housekeeping on the *shape* of each piece: it takes off the single-pixel
@@ -709,6 +731,19 @@ def _smooth_each_component(mask: np.ndarray, kernel: "np.ndarray") -> np.ndarray
     being carefully kept apart. There is no threshold that avoids this -- the
     kernel has to be wide enough to reshape a silhouette, and pieces standing a
     silhouette-width apart are what "separate" looks like.
+
+    ``max_kernel`` is an upper bound, not the size actually used. Each piece
+    gets a kernel no wider than a fraction of its own stroke thickness, judged
+    by the distance transform: a filter approaching the width of a shape does
+    not smooth that shape, it eats into it, and a caption's hyphen or comma is
+    only a few pixels across. Measured on the poster this protects, capping at
+    the full thickness (``2r``) split the hyphen in 一步 in two and lost 18% of
+    the strokes overall; capping at :data:`SMOOTH_KERNEL_SHARE` of it keeps every
+    glyph whole and retains 94% of each one's pixels on average.
+
+    Large elements are unaffected -- the coefficient only ever lowers the
+    kernel, and a silhouette has thickness to spare, so it still receives the
+    full :data:`SMOOTH_GAP_RATIO`.
     """
     import cv2
     import numpy as np
@@ -722,8 +757,20 @@ def _smooth_each_component(mask: np.ndarray, kernel: "np.ndarray") -> np.ndarray
     out = np.zeros(mask.shape[:2], np.uint8)
     for index in range(1, count):
         piece = (labels == index).astype(np.uint8)
-        piece = cv2.morphologyEx(piece, cv2.MORPH_OPEN, kernel)
-        piece = cv2.morphologyEx(piece, cv2.MORPH_CLOSE, kernel)
+
+        # ``r`` is the radius of the largest disc that fits inside the piece,
+        # so the piece is about ``2r`` across at its thickest. A kernel of that
+        # size would erase anything thinner than the thickest part -- which is
+        # most of a glyph. Allowing a fraction of it leaves the shape intact
+        # while still clearing the 1-2 px staircase the threshold leaves.
+        radius = float(cv2.distanceTransform(piece, cv2.DIST_L2, 5).max())
+        allowed = int(max(3, min(max_kernel, radius * SMOOTH_KERNEL_SHARE)))
+        if allowed % 2 == 0:
+            allowed -= 1
+        allowed = max(3, allowed)
+
+        piece = cv2.morphologyEx(piece, cv2.MORPH_OPEN, _ellipse(allowed))
+        piece = cv2.morphologyEx(piece, cv2.MORPH_CLOSE, _ellipse(allowed))
         out |= piece
     return out
 
@@ -732,7 +779,7 @@ def _outer_components(
     mask: np.ndarray,
     *,
     min_abs_px: int = 16,
-    min_fraction_of_largest: float = 0.002,
+    min_fraction_of_image: float = 0.00005,
 ) -> np.ndarray | None:
     """Every shape in the mask that is not sitting inside another one.
 
@@ -747,8 +794,13 @@ def _outer_components(
     bounding boxes, which cannot tell a mug beside a character from a mug in
     front of one.
 
-    Specks are still dropped, by absolute area and relative to the largest
-    piece, so scanner noise does not become a board.
+    The area floor is a fraction of the **image**, deliberately not of the
+    largest piece. Scaling it to the biggest piece makes the cut depend on how
+    big the subject happens to be: at 0.2% of a 289k-pixel character the floor
+    came to 577 px, which discarded the caption's hyphen (278 px) and the full
+    stop (302 px) -- both perfectly real content, simply small. A fraction of
+    the frame is stable across pictures, and the gap between noise and content
+    is wide: measured noise here is 1-2 px, the smallest real element 278 px.
     """
     import cv2
     import numpy as np
@@ -764,8 +816,7 @@ def _outer_components(
         key=lambda i: stats[i, cv2.CC_STAT_AREA],
         reverse=True,
     )
-    largest = stats[order[0], cv2.CC_STAT_AREA]
-    floor = max(min_abs_px, int(largest * min_fraction_of_largest))
+    floor = max(min_abs_px, int(mask.size * min_fraction_of_image))
 
     usable = [i for i in order if stats[i, cv2.CC_STAT_AREA] >= floor]
     if not usable:

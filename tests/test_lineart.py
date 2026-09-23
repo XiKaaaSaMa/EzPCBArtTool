@@ -590,14 +590,18 @@ def test_hand_drawn_outlines_still_get_bridged():
     assert mask.mean() > 0.15, "断笔没被桥接，填充从缺口漏了出去"
 
 
-def test_a_picture_whose_outlines_already_close_uses_the_narrow_kernel():
-    """The counterpart to the test above, so the cut between them is pinned."""
+def test_a_picture_whose_outlines_already_close_is_not_closed_at_all():
+    """The counterpart to the test above, so the cut between them is pinned.
+
+    ``None`` rather than a small kernel: a picture whose own colour blocks
+    already tell the whole story needs no bridging, and the operation is not
+    free -- it welds together strokes that merely pass near each other. On the
+    poster that lost the letter O of 哒哒哒 into the character beside it.
+    """
     from pcbart.image_prep import _adaptive_gap, _base_subject_mask
 
     base = _base_subject_mask(_poster(), None).astype(np.uint8)
-    short = min(base.shape)
-    narrow = max(3, int(short * 0.006)) | 1
-    assert _adaptive_gap(base) == narrow
+    assert _adaptive_gap(base) is None
 
 
 def test_line_art_does_not_draw_the_gaps_closed():
@@ -644,9 +648,51 @@ def test_smoothing_does_not_weld_the_pieces_back_together():
     before = cv2.connectedComponentsWithStats(mask.astype(np.uint8), 8)[0] - 1
     assert before == 2
 
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (41, 41))
-    smoothed = _smooth_each_component(_outer_components(mask), kernel)
+    smoothed = _smooth_each_component(_outer_components(mask), 41)
 
     after = cv2.connectedComponentsWithStats(smoothed.astype(np.uint8), 8)[0] - 1
     assert after == 2, f"平滑后两个元素被焊在一起了（{before} -> {after}）"
     assert smoothed[130, 175] == 0, "两个元素之间的背景被填上了"
+
+
+def test_small_elements_are_not_discarded_for_being_small():
+    """A caption's hyphen and full stop are content, not noise.
+
+    The area floor used to be a fraction of the *largest* piece, so it scaled
+    with the subject: on a 289k-pixel character it came to 577 px and threw
+    away a 278 px hyphen and a 302 px full stop. A fraction of the frame does
+    not move when the subject does, and the gap to actual noise is enormous --
+    scanner specks measured 1-2 px against a smallest real element of 278.
+    """
+    from pcbart.image_prep import _outer_components
+
+    mask = np.zeros((400, 600), np.uint8)
+    cv2.rectangle(mask, (20, 20), (300, 380), 1, -1)   # 主体, 约 106k px
+    cv2.rectangle(mask, (400, 200), (480, 208), 1, -1)  # 细长条, 约 648 px
+    cv2.circle(mask, (540, 300), 10, 1, -1)             # 小圆点, 约 314 px
+
+    kept = _outer_components(mask)
+    count = cv2.connectedComponentsWithStats(kept.astype(np.uint8), 8)[0] - 1
+    assert count == 3, f"小元素被当成噪点丢掉了（只剩 {count} 个）"
+
+
+def test_thin_glyphs_survive_smoothing():
+    """A piece thinner than the kernel must not be cut in half by it.
+
+    The kernel is capped to a fraction of each piece's own thickness. At the
+    full 13 px size the hyphen in 一步 was split into two fragments that the
+    area floor then removed, which is how the caption lost characters.
+    """
+    from pcbart.image_prep import _smooth_each_component
+
+    mask = np.zeros((200, 400), np.uint8)
+    cv2.rectangle(mask, (20, 40), (180, 160), 1, -1)   # 厚实的主体
+    cv2.rectangle(mask, (220, 95), (330, 105), 1, -1)  # 11px 高的细条, 像“一”
+
+    before = cv2.connectedComponentsWithStats(mask.astype(np.uint8), 8)[0] - 1
+    smoothed = _smooth_each_component(mask, 13)
+    after = cv2.connectedComponentsWithStats(smoothed.astype(np.uint8), 8)[0] - 1
+
+    assert before == 2
+    assert after == 2, f"细笔画被平滑核切碎了（{before} -> {after}）"
+    assert smoothed[100, 275] == 1, "细条的中段被抹掉了"
