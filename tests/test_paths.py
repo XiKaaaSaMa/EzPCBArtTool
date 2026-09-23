@@ -119,3 +119,48 @@ def test_the_gui_writes_its_cache_through_the_paths_module():
 
     assert "cache_dir(" in source
     assert 'Path(__file__).resolve().parent.parent / "out"' not in source
+
+
+def _real_drafts_dir():
+    """``drafts_dir`` as shipped, with the conftest redirect stepped around.
+
+    ``tests/conftest.py`` replaces ``paths.drafts_dir`` for every test so a
+    careless test cannot write into the user's library. These two tests are
+    *about* that function, so they import it from a clean module rather than
+    reading the patched attribute.
+    """
+    import importlib.util
+
+    from pcbart import paths
+
+    spec = importlib.util.spec_from_file_location("_paths_probe", paths.__file__)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.drafts_dir
+
+
+def test_the_draft_library_can_be_redirected_by_environment(monkeypatch, tmp_path):
+    """Scripts that drive the real window must not write into the user's library.
+
+    Saving unwritten work on exit is correct for the app and a hazard for a
+    script. During this project's own debugging it put a dozen ``未命名`` rows
+    into the developer's sidebar -- twice, from screenshot and diagnostic runs
+    that had no idea they were touching real data.
+    """
+    scratch = tmp_path / "scratch-drafts"
+    monkeypatch.setenv("PCBART_DRAFTS_DIR", str(scratch))
+
+    resolved = _real_drafts_dir()()
+
+    assert resolved == scratch
+    assert resolved.is_dir(), "重定向后的目录应当被创建"
+
+
+def test_without_the_override_the_library_stays_where_it_belongs(monkeypatch):
+    """The escape hatch must not change the default."""
+    monkeypatch.delenv("PCBART_DRAFTS_DIR", raising=False)
+
+    resolved = _real_drafts_dir()()
+
+    assert resolved.name == "drafts"
+    assert "out" in resolved.parts

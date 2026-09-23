@@ -278,6 +278,16 @@ def needs_denoising(image: np.ndarray) -> bool:
     """
     import numpy as np
 
+    # ⚠️ **Bounded, and this was measured the hard way.** The share being
+    # measured is a proportion of the frame, so it survives a rescale -- but
+    # computing it at full size does not. On a 36 043 x 19 653 drawing (708
+    # megapixels) this took **28.7 seconds** on the UI thread, because loading
+    # a picture has to know the answer before it can fill the panel. Reusing
+    # the same bound as the two-colour test keeps every whole-picture statistic
+    # in this project on the same budget.
+    from .image_prep import _probe_copy
+
+    image = _probe_copy(image)
     grey = np.clip(desaturate(image), 0, 255).astype(np.uint8)
     level = grey.astype(np.float32) / 255.0
     middle = float(((level > 0.2) & (level < 0.8)).mean())
@@ -343,7 +353,30 @@ def _tone_split(grey: np.ndarray) -> np.ndarray:
     return binary
 
 
-def _despeckle_tone(traced: np.ndarray, kernel: int = 3) -> np.ndarray:
+#: Despeckle kernel, as a fraction of the picture's short side.
+#:
+#: ⚠️ **A pixel count would not have worked, and this was measured.** The same
+#: drawing run at six sizes with a fixed 3 px kernel:
+#:
+#: ===========  ==========
+#: 400 px        7 fragments
+#: 1000 px      22
+#: 1382 px      33
+#: 4000 px      **85**
+#:
+#: The fragments scale with the picture, so a fixed kernel cleans the small
+#: version and leaves the large one dirty -- which is the same trap
+#: :mod:`pcbart.work_scale` exists to avoid. As a fraction, one number covers
+#: every size.
+#:
+#: The value is 3 px on a 1382 px drawing: enough to clear the slivers Otsu's
+#: boundary sheds, small enough that the scalloped lace across the top of the
+#: head survives. **A larger kernel is not better** -- 9 px cleared the
+#: fragments completely and erased that lace.
+DESPECKLE_KERNEL_RATIO = 0.0022
+
+
+def _despeckle_tone(traced: np.ndarray) -> np.ndarray:
     """Remove the hairline fragments a fill boundary leaves behind.
 
     Otsu's cut runs through soft edges, so wherever a picture has a gradual
@@ -352,18 +385,29 @@ def _despeckle_tone(traced: np.ndarray, kernel: int = 3) -> np.ndarray:
     largest 13x28. They read as specks of dirt on the board rather than as
     anything the artwork shows.
 
-    A single 3 px open-then-close removes most of them. **Deliberately small**:
-    9 px clears them completely but was measured erasing the scalloped lace
-    across the top of the head, which is real detail. Closing first bridges
-    one- and two-pixel notches in a boundary; opening then drops what is left
-    floating.
+    Open-then-close removes them. Closing first bridges the one- and two-pixel
+    notches a soft boundary leaves; opening then drops whatever is still
+    floating. The kernel scales with the picture -- see
+    :data:`DESPECKLE_KERNEL_RATIO` for why a fixed one was measured to fail.
 
     ``traced`` is 0 = ink, 255 = paper, so the operation runs on the paper mask
     and the polarity is restored afterwards.
     """
     import cv2
+    import numpy as np
 
-    element = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel, kernel))
+    height, width = traced.shape[:2]
+    # ⚠️ **Floored at 3, not scaled all the way down.** Measured on the same
+    # drawing at 400, 700 and 1000 px: a scaled kernel drops to 1-2 px and
+    # leaves 29, 57 and 92 fragments respectively, while a flat 3 px leaves
+    # 3, 16 and 27. The fragments never get smaller than one or two pixels, so
+    # there is nothing to gain by shrinking the kernel below 3 -- it stops
+    # being able to open anything at all.
+    size = max(3, int(round(min(height, width) * DESPECKLE_KERNEL_RATIO)))
+    if size % 2 == 0:
+        size -= 1
+
+    element = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
     paper = (traced > 128).astype(np.uint8)
     paper = cv2.morphologyEx(paper, cv2.MORPH_CLOSE, element)
     paper = cv2.morphologyEx(paper, cv2.MORPH_OPEN, element)

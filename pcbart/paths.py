@@ -88,8 +88,22 @@ def drafts_dir() -> Path:
     **Not a temporary directory, and not inside the install folder.** The draft
     library is the user's work; a location the OS may clean up, or that an
     upgrade replaces, would lose it.
+
+    ``PCBART_DRAFTS_DIR`` overrides the location. It exists because scripts that
+    drive the real window -- a screenshot run, a diagnostic -- **write into the
+    user's library when the window closes**, since the app saves unwritten work
+    on exit. That is correct behaviour for the app and a hazard for a script:
+    during this project's own debugging it put a dozen ``未命名`` rows into the
+    developer's sidebar (twice). The test suite is already covered by
+    ``tests/conftest.py``; this is for everything else.
+
+    set PCBART_DRAFTS_DIR=%TEMP%/scratch-drafts
     """
-    root = data_root() / "drafts" if is_frozen() else data_root() / "out" / "drafts"
+    override = os.environ.get("PCBART_DRAFTS_DIR")
+    if override:
+        root = Path(override)
+    else:
+        root = data_root() / "drafts" if is_frozen() else data_root() / "out" / "drafts"
     root.mkdir(parents=True, exist_ok=True)
     return root
 

@@ -234,3 +234,47 @@ def test_the_panel_says_why_it_changed_a_setting(app, tmp_path):
         assert "降噪" in panel.process_note.text(), panel.process_note.text()
     finally:
         window.hide()
+
+
+def test_shading_detection_is_bounded_too():
+    """The second half of the same trap, caught before it shipped.
+
+    ⚠️ ``is_two_tone`` was fixed to run on a bounded copy after it froze the
+    window for 48 s on a 708-megapixel drawing. **``needs_denoising`` had the
+    identical bug** -- it measured its proportion at full resolution and took
+    **28.7 s** on the same file, on the same UI-thread path.
+
+    Both are "what share of this picture is X" questions, and a proportion
+    survives a rescale, so both take the same bound. Asserted as a bound on the
+    *work* rather than on wall-clock time, which would be flaky under load.
+    """
+    from pcbart.image_prep import TWO_TONE_PROBE_SIDE, _probe_copy
+
+    image = np.full((4000, 6000, 3), 200, np.uint8)
+    image[500:3500, 500:5500] = 40
+
+    assert max(_probe_copy(image).shape[:2]) <= TWO_TONE_PROBE_SIDE
+
+    import time
+
+    started = time.perf_counter()
+    needs_denoising(image)
+    elapsed = time.perf_counter() - started
+    assert elapsed < 5.0, f"检测耗时 {elapsed:.2f}s，说明又跑到全分辨率上了"
+
+
+def test_bounding_the_probe_does_not_change_the_verdict():
+    """A flat drawing must not start looking shaded just because it shrank."""
+    flat = np.full((2400, 2400, 3), 255, np.uint8)
+    cv2.rectangle(flat, (300, 300), (2100, 2100), (0, 0, 0), 20)
+
+    shaded = np.zeros((2400, 2400, 3), np.uint8)
+    for y in range(2400):
+        shaded[y, :] = (
+            min(255, 30 + y // 12),
+            min(255, 40 + y // 14),
+            min(255, 60 + y // 10),
+        )
+
+    assert needs_denoising(flat) is False
+    assert needs_denoising(shaded) is True
