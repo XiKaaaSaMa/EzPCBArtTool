@@ -11,11 +11,19 @@ Editing follows the editor conventions the user asked for:
 * drag inside the image to move it (with a short press-and-hold, so a passing
   click does not shift it);
 * drag a handle to resize from that edge.
+
+The keyboard and right-click entries follow the same conventions an EDA tool
+uses -- copy, paste, cut, delete, duplicate, nudge with the arrow keys, rotate
+with ``R``. Only operations this tool actually has are bound: there is no
+undo stack, no multi-selection and no z-order to move things through, so those
+keys do nothing rather than pretending.
 """
 
 from __future__ import annotations
 
 import sys
+import uuid
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -24,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
+    QAction,
     QBrush,
     QColor,
     QImage,
@@ -33,13 +42,28 @@ from PySide6.QtGui import (
     QPixmap,
     QPolygonF,
 )
-from PySide6.QtWidgets import QSizePolicy, QWidget
+from PySide6.QtWidgets import QMenu, QSizePolicy, QWidget
 
 from pcbart.artboard import ArtBoard, ImagePlacement, drawn_size_mm
 from pcbart.design_layers import layer
 
 HANDLE_SIZE = 11.0
 HANDLE_HIT = 13.0
+
+#: How far a pasted or duplicated copy lands from its original, in mm. Enough
+#: to see that there are now two, small enough that the copy is still where the
+#: user was looking.
+DUPLICATE_OFFSET_MM = 3.0
+
+#: Arrow-key nudge, and the finer step when Shift is held. The coarse step is
+#: millimetre-friendly because the document is in millimetres; the fine step is
+#: for lining a picture up against a board edge.
+NUDGE_MM = 1.0
+NUDGE_FINE_MM = 0.1
+
+#: A keyboard rotation step. Quarter turns are what a picture placed by eye
+#: needs; arbitrary angles are the property panel's job.
+ROTATE_STEP_DEG = 90.0
 
 # Painting colours, matching the palette used by the surrounding application.
 CANVAS_BG = "#ffffff"
@@ -62,6 +86,30 @@ class DesignCanvas(QWidget):
 
     placement_changed = Signal()
     """Emitted after a move or resize so the inspector can refresh."""
+
+    document_changed = Signal()
+    """Emitted when artwork is added or removed -- a paste, a delete, a
+    duplicate.
+
+    Separate from :attr:`placement_changed` on purpose: that one says "the
+    selected object's numbers moved", this one says "the set of objects changed
+    and anything listing them is now out of date". A delete has no placement
+    left to report, so it cannot use the first.
+    """
+
+    clipboard_changed = Signal()
+    """Emitted when the clipboard gains or loses content.
+
+    Needed on its own because copying changes no selection and no document --
+    but it is what decides whether 粘贴 is available, and a menu that stays
+    greyed out after a successful copy looks like the copy failed.
+    """
+
+    fit_to_board_requested = Signal()
+    """Ask the window to run 按板框缩放, which owns the board-level logic."""
+
+    reset_view_requested = Signal()
+    """Ask the window to run 适应窗口."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -109,6 +157,14 @@ class DesignCanvas(QWidget):
 
         self._space_held = False
         self._pan_anchor = None
+
+        self._clipboard: list[ImagePlacement] = []
+        """Copied artwork, in placement order, or empty.
+
+        Holds *copies* rather than references: the user may delete or edit the
+        original after copying it, and what gets pasted has to be what was on
+        the clipboard at the moment of the copy.
+        """
 
         # Visible geometry, recomputed on every paint.
         self._plot = QRectF()
@@ -390,6 +446,230 @@ class DesignCanvas(QWidget):
             point, Qt.OddEvenFill
         )
 
+    # ------------------------------------------------------------- editing
+
+    def linked(self, placement) -> list[ImagePlacement]:
+        """The placements that act as one object with ``placement``.
+
+        A board painting is **two** placements -- the white tone on silkscreen
+        and the black on copper -- and the exporter writes them as a single
+        geometry derived from the white one. Handling the tones separately
+        tears the exported board along their seam, which is why the property
+        panel already carries 翻转/旋转 across the pair. Copying, deleting and
+        moving have exactly the same need, so they ask here.
+
+        Line art is *not* paired: a picture spread over three layers really is
+        three objects, each with its own size and position, and the user picks
+        and edits them individually.
+        """
+        if placement is None:
+            return []
+        if placement.tone not in ("white", "black") or not placement.import_id:
+            return [placement]
+        return [
+            item
+            for item in self.board.placements
+            if item.import_id == placement.import_id
+            and item.tone in ("white", "black")
+        ]
+
+    def copy_selection(self) -> bool:
+        """Put the selection (and a painting's other tone) on the clipboard."""
+        group = self.linked(self.selected)
+        if not group:
+            return False
+        self._clipboard = [replace(item) for item in group]
+        self.clipboard_changed.emit()
+        return True
+
+    def cut_selection(self) -> bool:
+        if not self.copy_selection():
+            return False
+        return self.delete_selection()
+
+    def paste(self) -> ImagePlacement | None:
+        """Add a copy of the clipboard, offset so it is visibly a new object."""
+        if not self._clipboard:
+            return None
+        return self._insert_clones(self._clipboard)
+
+    def duplicate_selection(self) -> ImagePlacement | None:
+        """Copy the selection in place, without touching the clipboard.
+
+        Deliberately not implemented as copy-then-paste: that would replace
+        whatever the user had copied, so duplicating would quietly destroy a
+        clipboard they were still using.
+        """
+        group = self.linked(self.selected)
+        if not group:
+            return None
+        return self._insert_clones(group)
+
+    def _insert_clones(self, source: list[ImagePlacement]) -> ImagePlacement | None:
+        """Add offset copies of ``source`` and select the first one."""
+        if not source:
+            return None
+
+        # One fresh import id for the whole group, so a copied painting's two
+        # tones still belong together -- and so the copy is independent of the
+        # original rather than joining its painting on export.
+        new_import_id = uuid.uuid4().hex[:8]
+
+        clones: list[ImagePlacement] = []
+        for item in source:
+            clone = replace(item)
+            clone.x_mm += DUPLICATE_OFFSET_MM
+            clone.y_mm -= DUPLICATE_OFFSET_MM
+            clone.import_id = new_import_id
+            self._ensure_pixmap(clone.path)
+            if clone.processed_path:
+                self._ensure_pixmap(clone.processed_path)
+            self.board.add_placement(clone)
+            clones.append(clone)
+
+        # Pasting repeatedly cascades rather than stacking every copy on one
+        # spot, so the second paste is as visible as the first.
+        if source is self._clipboard:
+            self._clipboard = [replace(item) for item in clones]
+
+        first = clones[0]
+        self.selected = first
+        self.selection_changed.emit(first)
+        self.document_changed.emit()
+        self.update()
+        return first
+
+    def delete_selection(self) -> bool:
+        """Remove the selection, and a painting's other tone with it."""
+        group = self.linked(self.selected)
+        if not group:
+            return False
+        for item in group:
+            self.board.remove_placement(item)
+        self.selected = None
+        self.selection_changed.emit(None)
+        self.document_changed.emit()
+        self.update()
+        return True
+
+    def nudge_selection(self, dx_mm: float, dy_mm: float) -> bool:
+        """Move the selection by millimetres, as the arrow keys do."""
+        group = self.linked(self.selected)
+        if not group:
+            return False
+        for item in group:
+            item.x_mm += dx_mm
+            item.y_mm += dy_mm
+        self.placement_changed.emit()
+        self.update()
+        return True
+
+    def rotate_selection(self, degrees: float) -> bool:
+        """Turn the selection, keeping a painting's two tones together."""
+        group = self.linked(self.selected)
+        if not group:
+            return False
+        for item in group:
+            item.rotation_deg = (item.rotation_deg + degrees + 180.0) % 360.0 - 180.0
+        self.placement_changed.emit()
+        self.update()
+        return True
+
+    def flip_selection(self, *, horizontal: bool) -> bool:
+        group = self.linked(self.selected)
+        if not group:
+            return False
+        for item in group:
+            if horizontal:
+                item.flip_horizontal = not item.flip_horizontal
+            else:
+                item.flip_vertical = not item.flip_vertical
+        self.placement_changed.emit()
+        self.update()
+        return True
+
+    def centre_selection(self) -> bool:
+        group = self.linked(self.selected)
+        if not group:
+            return False
+        for item in group:
+            item.x_mm = 0.0
+            item.y_mm = 0.0
+        self.placement_changed.emit()
+        self.update()
+        return True
+
+    @property
+    def clipboard_size(self) -> int:
+        """How many objects a paste would add; 0 disables the menu entry."""
+        return len(self._clipboard)
+
+    # ------------------------------------------------------------ menu
+
+    def contextMenuEvent(self, event) -> None:  # noqa: N802
+        """The right-click menu, for the object under the pointer.
+
+        Right-clicking an object selects it first. A menu that acted on
+        something other than what is under the pointer would be a trap: the
+        user's last click is what the entries appear to be about, and they have
+        no way to tell that it is not.
+        """
+        x_mm, y_mm = self.to_mm(event.pos())
+        hit = self.board.placement_at(x_mm, y_mm)
+        if hit is not None and hit is not self.selected:
+            self.selected = hit
+            self.selection_changed.emit(hit)
+            self.update()
+
+        menu = QMenu(self)
+        if hit is not None:
+            self._fill_object_menu(menu)
+        else:
+            self._fill_canvas_menu(menu)
+
+        menu.exec(event.globalPos())
+        event.accept()
+
+    def _fill_object_menu(self, menu: QMenu) -> None:
+        for text, slot in (
+            ("复制", self.copy_selection),
+            ("剪切", self.cut_selection),
+            ("复制一份", self.duplicate_selection),
+            ("删除", self.delete_selection),
+        ):
+            action = menu.addAction(text)
+            action.triggered.connect(slot)
+
+        menu.addSeparator()
+        rotate = menu.addAction("旋转 90°")
+        rotate.triggered.connect(lambda: self.rotate_selection(ROTATE_STEP_DEG))
+        flip_h = menu.addAction("水平翻转")
+        flip_h.triggered.connect(lambda: self.flip_selection(horizontal=True))
+        flip_v = menu.addAction("垂直翻转")
+        flip_v.triggered.connect(lambda: self.flip_selection(horizontal=False))
+
+        menu.addSeparator()
+        centre = menu.addAction("居中")
+        centre.triggered.connect(self.centre_selection)
+        fit = menu.addAction("按板框缩放")
+        fit.triggered.connect(self.fit_to_board_requested.emit)
+
+        menu.addSeparator()
+        self._add_paste_entry(menu)
+
+    def _fill_canvas_menu(self, menu: QMenu) -> None:
+        self._add_paste_entry(menu)
+        menu.addSeparator()
+        fit = menu.addAction("按板框缩放")
+        fit.triggered.connect(self.fit_to_board_requested.emit)
+        reset = menu.addAction("适应窗口")
+        reset.triggered.connect(self.reset_view_requested.emit)
+
+    def _add_paste_entry(self, menu: QMenu) -> None:
+        paste = menu.addAction("粘贴")
+        paste.setEnabled(self.clipboard_size > 0)
+        paste.triggered.connect(self.paste)
+
     # --------------------------------------------------------------- input
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt naming
@@ -507,7 +787,52 @@ class DesignCanvas(QWidget):
             self.setCursor(Qt.OpenHandCursor)
             event.accept()
             return
+
+        if event.key() == Qt.Key_Escape and self.selected is not None:
+            self.selected = None
+            self.selection_changed.emit(None)
+            self.update()
+            event.accept()
+            return
+
+        if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
+            if self.delete_selection():
+                event.accept()
+                return
+
+        if event.key() == Qt.Key_R and not event.modifiers() & Qt.ControlModifier:
+            if self.rotate_selection(ROTATE_STEP_DEG):
+                event.accept()
+                return
+
+        step = self._nudge_step(event.modifiers())
+        if step and event.key() in (
+            Qt.Key_Left,
+            Qt.Key_Right,
+            Qt.Key_Up,
+            Qt.Key_Down,
+        ):
+            dx = {Qt.Key_Left: -step, Qt.Key_Right: step}.get(event.key(), 0.0)
+            dy = {Qt.Key_Down: -step, Qt.Key_Up: step}.get(event.key(), 0.0)
+            if self.nudge_selection(dx, dy):
+                event.accept()
+                return
+
         super().keyPressEvent(event)
+
+    @staticmethod
+    def _nudge_step(modifiers) -> float:
+        """How far an arrow key moves the selection, or 0 to leave it alone.
+
+        Shift is the finer step rather than the coarser one: the base step is
+        already a whole millimetre, and the case that needs help is landing a
+        picture exactly on a board edge, not crossing the board faster.
+        """
+        if modifiers & Qt.ShiftModifier:
+            return NUDGE_FINE_MM
+        if modifiers & (Qt.ControlModifier | Qt.AltModifier):
+            return 0.0
+        return NUDGE_MM
 
     def keyReleaseEvent(self, event) -> None:  # noqa: N802
         if event.key() == Qt.Key_Space and not event.isAutoRepeat():

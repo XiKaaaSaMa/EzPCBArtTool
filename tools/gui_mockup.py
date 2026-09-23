@@ -105,6 +105,7 @@ from PySide6.QtGui import (
     QFont,
     QFontMetrics,
     QImage,
+    QKeySequence,
     QPainter,
     QPainterPath,
     QPen,
@@ -6306,6 +6307,93 @@ def export_gerber_project(main_window: QWidget) -> str | None:
     return written
 
 
+#: Keyboard shortcuts for the 编辑 menu, following the conventions an EDA tool
+#: uses. Only operations this tool actually has appear -- there is no undo
+#: stack and no multi-selection, so ``Ctrl+Z`` and ``Ctrl+A`` are absent rather
+#: than bound to something that would do nothing.
+EDIT_ACTIONS: tuple[tuple[str, str, str], ...] = (
+    ("复制", "Ctrl+C", "copy_selection"),
+    ("剪切", "Ctrl+X", "cut_selection"),
+    ("粘贴", "Ctrl+V", "paste"),
+    ("复制一份", "Ctrl+D", "duplicate_selection"),
+    ("删除", "Del", "delete_selection"),
+    ("旋转 90°", "R", "rotate_quarter_turn"),
+    ("水平翻转", "", "flip_horizontal"),
+    ("垂直翻转", "", "flip_vertical"),
+    ("居中", "", "centre_selection"),
+    ("按板框缩放", "", "fit_to_board"),
+)
+
+#: Entries that need something selected, and so are greyed out otherwise.
+EDIT_NEEDS_SELECTION = frozenset(
+    {
+        "复制",
+        "剪切",
+        "复制一份",
+        "删除",
+        "旋转 90°",
+        "水平翻转",
+        "垂直翻转",
+        "居中",
+    }
+)
+
+
+def _wire_edit_actions(
+    window: QMainWindow, actions_by_name: dict, canvas, on_fit_requested
+) -> None:
+    """Connect the 编辑 menu to the canvas's editing operations.
+
+    The menu and the canvas's right-click menu call the same methods, so an
+    operation cannot behave one way from the keyboard and another from the
+    mouse. Shortcuts ride on the menu actions, which is what makes them work
+    wherever focus is rather than only while the canvas has it.
+    """
+    operations = {
+        "copy_selection": canvas.copy_selection,
+        "cut_selection": canvas.cut_selection,
+        "paste": canvas.paste,
+        "duplicate_selection": canvas.duplicate_selection,
+        "delete_selection": canvas.delete_selection,
+        "rotate_quarter_turn": lambda: canvas.rotate_selection(90.0),
+        "flip_horizontal": lambda: canvas.flip_selection(horizontal=True),
+        "flip_vertical": lambda: canvas.flip_selection(horizontal=False),
+        "centre_selection": canvas.centre_selection,
+        "fit_to_board": on_fit_requested,
+    }
+
+    actions: dict[str, QAction] = {}
+    for label, shortcut, operation in EDIT_ACTIONS:
+        action = actions_by_name[label]
+        action.triggered.connect(operations[operation])
+        if shortcut:
+            action.setShortcut(QKeySequence(shortcut))
+            # Without this the shortcut only fires while the menu bar has
+            # focus, which is never where the user is.
+            action.setShortcutContext(Qt.WindowShortcut)
+        actions[label] = action
+
+    # The canvas's own right-click entries are the same operations, so they are
+    # wired through the menu actions' enabled state below rather than being
+    # allowed to drift.
+    def sync_enabled(_selection=None) -> None:
+        has_selection = canvas.selected is not None
+        for label in EDIT_NEEDS_SELECTION:
+            actions[label].setEnabled(has_selection)
+        actions["粘贴"].setEnabled(canvas.clipboard_size > 0)
+
+    canvas.selection_changed.connect(sync_enabled)
+    # Copying changes neither the selection nor the document, but it is what
+    # makes 粘贴 possible, so it has to refresh the enabled state too.
+    canvas.clipboard_changed.connect(sync_enabled)
+    # A paste or a delete changes what is on the board without moving the
+    # selection, so the layer/draft panes are told separately.
+    canvas.document_changed.connect(lambda: refresh_workspace_state(window))
+    canvas.fit_to_board_requested.connect(on_fit_requested)
+    canvas.reset_view_requested.connect(canvas.fit_view)
+    sync_enabled()
+
+
 def build_window() -> QMainWindow:
     window = MainWindow()
     window.setWindowTitle("PCB 艺术板工具")
@@ -6349,7 +6437,26 @@ def build_window() -> QMainWindow:
             "退出",
         ],
     )
-    add_items(menu.addMenu("编辑"), ["适应窗口", "放大", "缩小"])
+    add_items(
+        menu.addMenu("编辑"),
+        [
+            "复制",
+            "剪切",
+            "粘贴",
+            "复制一份",
+            "删除",
+            "-",
+            "旋转 90°",
+            "水平翻转",
+            "垂直翻转",
+            "居中",
+            "按板框缩放",
+            "-",
+            "适应窗口",
+            "放大",
+            "缩小",
+        ],
+    )
     add_items(menu.addMenu("视图"), ["图层…"])
     add_items(menu.addMenu("帮助"), ["关于"])
 
@@ -6639,6 +6746,14 @@ def build_window() -> QMainWindow:
     fit_action.triggered.connect(canvas.fit_view)
     zoom_in_action.triggered.connect(lambda: canvas.zoom_by(1.25))
     zoom_out_action.triggered.connect(lambda: canvas.zoom_by(1 / 1.25))
+
+    # The 编辑 menu and the canvas right-click menu drive the same operations,
+    # so both go through the canvas rather than one of them reaching into the
+    # board itself. Shortcuts live on the menu actions, which is what makes
+    # them work wherever focus happens to be -- the canvas is not the only
+    # place a user expects Ctrl+C to work.
+    _wire_edit_actions(window, actions_by_name, canvas, on_fit_requested)
+
     for action in (export_action, export_toolbar_action):
         action.triggered.connect(lambda: export_project(window))
     for action in (gerber_action, gerber_toolbar_action):
