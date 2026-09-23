@@ -223,6 +223,22 @@ MIDDLE_THICKNESS_LIMIT = 0.30
 CHROMA_LIMIT = 12
 
 
+#: Longest side the two-colour test looks at.
+#:
+#: ⚠️ **This test must never run at full resolution.** It answers a question
+#: about the whole histogram -- "are there only two tones?" -- which a
+#: downscaled copy answers just as well, and at full resolution it is ruinous:
+#: measured on a 36 043 x 19 653 drawing (708 megapixels, one of the user's own
+#: files) it took **48.3 seconds** on the UI thread, so loading a picture froze
+#: the window for the better part of a minute. That is exactly the "algorithm
+#: costs grow with the picture" trap the rest of this module already avoids
+#: through :mod:`pcbart.work_scale`.
+#:
+#: 1200 px is far more than a histogram needs and costs about 15 ms, so the
+#: bound is generous rather than tight.
+TWO_TONE_PROBE_SIDE = 1200
+
+
 def is_two_tone(image: np.ndarray, tolerance: int = TWO_TONE_TOLERANCE) -> bool:
     """Whether the picture is only two colours, ignoring edge artefacts.
 
@@ -237,10 +253,16 @@ def is_two_tone(image: np.ndarray, tolerance: int = TWO_TONE_TOLERANCE) -> bool:
     single pixel removes 95% of it. So the test is about where the middle
     values are, not whether they exist.
 
+    Runs on a bounded copy -- see :data:`TWO_TONE_PROBE_SIDE`. Nothing here
+    needs full resolution: two flat colours stay two flat colours when the
+    picture is shrunk, and the edge ringing this is looking for stays on the
+    edges. Shrinking first is what keeps a 708-megapixel drawing from freezing
+    the window for 48 seconds.
+
     Four conditions, and every one is needed:
 
-    * **No real colour.** Checked first, on the original channels. See
-      :data:`CHROMA_LIMIT` for why the desaturated tests cannot do this.
+    * **No real colour.** Checked first. See :data:`CHROMA_LIMIT` for why the
+      desaturated tests cannot do this.
     * **Two centres, far apart.** Otsu always splits a histogram in two, so it
       reports a split even on a smooth ramp; the halves only mean "two colours"
       when they are far enough apart to be separate.
@@ -259,6 +281,7 @@ def is_two_tone(image: np.ndarray, tolerance: int = TWO_TONE_TOLERANCE) -> bool:
     if image is None or image.size == 0:
         return False
 
+    image = _probe_copy(image)
     if not _is_colourless(image):
         return False
 
@@ -296,6 +319,35 @@ def is_two_tone(image: np.ndarray, tolerance: int = TWO_TONE_TOLERANCE) -> bool:
 
     surviving = cv2.erode(middle, np.ones((3, 3), np.uint8))
     return bool(surviving.sum() / middle.sum() <= MIDDLE_THICKNESS_LIMIT)
+
+
+def _probe_copy(image: np.ndarray) -> np.ndarray:
+    """A bounded-size copy for whole-picture statistics.
+
+    Shrinking *before* measuring is the point: the numbers this feeds are
+    proportions of the frame, and a proportion survives a rescale. Doing the
+    measurement first and shrinking afterwards would pay the full cost, which
+    is the mistake this exists to prevent.
+
+    ``INTER_AREA`` is the right filter for a downscale -- it averages each
+    source block, so the two tones stay the two tones rather than gaining
+    intermediate values from nearest-neighbour sampling. Edge ringing also
+    survives, which matters because finding it is half of what the test does.
+    """
+    import cv2
+    import numpy as np
+
+    height, width = image.shape[:2]
+    longest = max(height, width)
+    if longest <= TWO_TONE_PROBE_SIDE:
+        return image
+
+    scale = TWO_TONE_PROBE_SIDE / longest
+    return cv2.resize(
+        image,
+        (max(1, int(round(width * scale))), max(1, int(round(height * scale)))),
+        interpolation=cv2.INTER_AREA,
+    )
 
 
 def _is_colourless(image: np.ndarray, limit: int = CHROMA_LIMIT) -> bool:

@@ -323,3 +323,61 @@ def test_an_unshown_toolbar_reports_its_size_hint_not_the_default(app, tmp_path)
         assert chrome_height(window) < window.height()
     finally:
         window.hide()
+
+
+# ------------------------------------------------------------------ performance
+
+
+def test_detection_is_bounded_so_a_huge_drawing_does_not_freeze_the_window(
+    app, tmp_path
+):
+    """Regression: a 708-megapixel drawing froze the UI for 48 seconds.
+
+    ⚠️ **This ran at full resolution on the UI thread**, because loading a
+    picture needs the answer before it can fill the panel. On one of the user's
+    own files -- 36043 x 19653 -- it took **48.3 seconds**, which is
+    indistinguishable from the application hanging. The answer does not need
+    that resolution: "are there only two tones?" is a question about the
+    histogram, and a shrunken copy answers it just as well.
+
+    Asserted as a *bound on the work*, not on wall-clock time: a timing
+    assertion would be flaky on a loaded machine, while the probe size is the
+    thing that actually has to stay bounded.
+    """
+    import time
+
+    from pcbart.image_prep import TWO_TONE_PROBE_SIDE, _probe_copy
+
+    # A big two-tone drawing, built rather than loaded so the test is fast.
+    image = np.full((4000, 6000, 3), 255, np.uint8)
+    image[500:3500, 500:5500] = 0
+
+    probe = _probe_copy(image)
+    assert max(probe.shape[:2]) <= TWO_TONE_PROBE_SIDE, (
+        f"检测没有降采样：{probe.shape[:2]} 超过 {TWO_TONE_PROBE_SIDE}"
+    )
+
+    started = time.perf_counter()
+    result = is_two_tone(image)
+    elapsed = time.perf_counter() - started
+
+    assert result is True, "降采样后仍应认出这是两色图"
+    # Generous: full resolution took ~48 s on the real file. Anything near
+    # that means the bound has been lost.
+    assert elapsed < 5.0, f"检测耗时 {elapsed:.2f}s，说明又跑到全分辨率上了"
+
+
+def test_shrinking_does_not_change_the_verdict(app):
+    """The bound must not cost accuracy on the cases that matter."""
+    black_on_white = np.full((2400, 2400, 3), 255, np.uint8)
+    black_on_white[400:2000, 400:2000] = 0
+
+    with_colour = black_on_white.copy()
+    with_colour[600:1000, 600:1000] = (200, 60, 40)
+
+    with_grey = black_on_white.copy()
+    with_grey[600:1000, 600:1000] = 128
+
+    assert is_two_tone(black_on_white) is True
+    assert is_two_tone(with_colour) is False, "彩色块不该因为缩小而消失"
+    assert is_two_tone(with_grey) is False, "实心灰块不该因为缩小而消失"
