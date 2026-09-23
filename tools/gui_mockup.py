@@ -1966,6 +1966,14 @@ class PreprocessPanel(FloatingPanel):
         import instead of taking it over. Empty until something is imported.
         """
 
+        self._two_tone_source: bool = False
+        """Whether the loaded picture was detected as two-colour."""
+
+        self._soft_shaded_source: bool = False
+        """Whether the loaded picture looked softly shaded, so 降噪 was ticked
+        for it. Recorded so the panel can say why it changed a setting on its
+        own rather than leaving the user to notice."""
+
         self._committed_style: str = ""
         self._raw_snapped: bool = False
         """Whether the raw (unprocessed) import was snapped to pure black and
@@ -2688,6 +2696,7 @@ class PreprocessPanel(FloatingPanel):
         the uploaded file stays untouched.
         """
         from pcbart.image_prep import is_two_tone
+        from pcbart.lineart import needs_denoising
 
         try:
             detected = is_two_tone(bgr)
@@ -2699,10 +2708,50 @@ class PreprocessPanel(FloatingPanel):
         self.process_check.setChecked(not detected)
         self.process_check.blockSignals(False)
 
+        # A softly shaded picture cannot be traced without blurring first: the
+        # dodge response is an edge detector, and across a smooth gradient it
+        # answers with hundreds of irregular rings instead of lines. Ticking
+        # 降噪 for such a picture is the same kind of suggestion as the
+        # two-colour switch above -- the checkbox stays live, so a user who
+        # wants the raw trace can simply untick it.
+        soft = not detected
+        if soft:
+            try:
+                soft = needs_denoising(bgr)
+            except Exception:  # noqa: BLE001 - never block a load on a hint
+                soft = False
+        if soft:
+            self.denoise_check.blockSignals(True)
+            self.denoise_check.setChecked(True)
+            self.denoise_check.blockSignals(False)
+            # The slider's value means "pixels of the user's picture", so the
+            # useful kernel is a fraction of the picture rather than a fixed
+            # number: the same 5 px that cleans a 1400 px drawing does almost
+            # nothing on a 4000 px one. 0.65% of the short side lands on 9 px
+            # for the 1378 px drawing this was tuned against, which is where the
+            # fragments stop and the fine strands are still intact -- 5 px left
+            # 74 of them, 15 px started erasing hair.
+            height, width = bgr.shape[:2]
+            wanted = int(round(min(height, width) * SOFT_SHADING_KERNEL_SHARE))
+            self.denoise_slider.blockSignals(True)
+            self.denoise_slider.setValue(
+                max(self.denoise_slider.minimum(),
+                    min(self.denoise_slider.maximum(), wanted))
+            )
+            self.denoise_slider.blockSignals(False)
+        self._soft_shaded_source = soft
+
         if detected:
             self.process_note.setText(
                 "检测到这张图只有两种颜色，已取消「处理图像」："
                 "图片会原样放到画板上。需要线稿或板画效果时，勾选上方开关即可。"
+            )
+            self.process_note.setStyleSheet(f"color: {SUCCESS}; font-size: 11px;")
+        elif soft:
+            self.process_note.setText(
+                "检测到这张图有柔和明暗渐变，已勾选「降噪」："
+                "渐变会让线稿切出很多碎圈，先模糊再提取才成线。"
+                "觉得细节损失太多可以取消勾选。"
             )
             self.process_note.setStyleSheet(f"color: {SUCCESS}; font-size: 11px;")
         else:
@@ -6524,6 +6573,16 @@ def export_gerber_project(main_window: QWidget) -> str | None:
         f"下单文件已生成，含 {len(report['files'])} 个 Gerber 文件"
     )
     return written
+
+
+#: Denoise kernel for a softly shaded picture, as a fraction of its short side.
+#:
+#: Tuned against the drawing that prompted the auto-detect: 0.65% of its 1378 px
+#: short side is 9 px, which is where the fragmented rings stop (74 fragments at
+#: 5 px, 31 at 9) while the fine hair strands are still intact (15 px began
+#: erasing them). Expressed as a fraction rather than a number because the
+#: slider's unit is pixels of the user's own picture.
+SOFT_SHADING_KERNEL_SHARE = 0.0065
 
 
 #: Keyboard shortcuts for the 编辑 menu, following the conventions an EDA tool

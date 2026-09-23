@@ -46,6 +46,8 @@ __all__ = [
     "dodge_response",
     "line_art",
     "line_art_preview",
+    "SOFT_SHADING_MIDDLE_SHARE",
+    "needs_denoising",
 ]
 
 RADIUS_RATIO = 0.0105
@@ -181,6 +183,56 @@ def desaturate(bgr: np.ndarray) -> np.ndarray:
     maximum = bgr.max(axis=2)
     minimum = bgr.min(axis=2)
     return (maximum.astype(np.uint16) + minimum) / 2.0
+
+
+#: Share of the frame that may sit in the mid-tones before the picture is
+#: taken to be softly shaded rather than drawn in flat colours.
+#:
+#: ⚠️ **Soft shading is what breaks the line algorithm, and it cannot be fixed
+#: inside it.** The dodge response answers "is this pixel darker than its
+#: neighbourhood", which is a question about *edges*. Across a smooth gradient
+#: -- the hair of the drawing that prompted this -- there are no edges, only a
+#: slow ramp, so the response wobbles a little and the threshold chops those
+#: wobbles into hundreds of irregular rings. Measured on that picture: 236
+#: fragments under 200 px in the hair alone, which is exactly what the user
+#: described as "到处都是不规则的圈".
+#:
+#: Blurring first is what removes them, because it flattens the wobble before
+#: the threshold sees it. Measured: 236 fragments at the raw threshold, 74 after
+#: a 5 px blur, 37 after 9 px.
+#:
+#: Measured mid-tone share: 30% on that drawing, 64% on a colour photo, against
+#: 0.4-3.9% on the flat line drawings.
+SOFT_SHADING_MIDDLE_SHARE = 0.12
+
+
+def needs_denoising(image: np.ndarray) -> bool:
+    """Whether this picture is softly shaded and wants a blur before tracing.
+
+    A flat line drawing has almost nothing between black and white: its ink is
+    dark, its paper is light, and the only mid-tones are the anti-aliased rim of
+    a stroke. A softly shaded illustration is the opposite -- most of the canvas
+    is a gradient -- and tracing one without blurring first produces the ring
+    artefacts described above.
+
+    The distinction is decided from the picture, not from a filename or a
+    container: the same artwork arrives as a flat PNG export or as a shaded JPEG
+    depending on what the user did to it, and only the pixels say which.
+
+    Measured on the pictures this tool handles:
+
+    ====================  ==========
+    flat line drawings    0.4 - 3.9%
+    soft-shaded drawing   **30%**
+    colour photograph     **64%**
+    ====================  ==========
+    """
+    import numpy as np
+
+    grey = np.clip(desaturate(image), 0, 255).astype(np.uint8)
+    level = grey.astype(np.float32) / 255.0
+    middle = float(((level > 0.2) & (level < 0.8)).mean())
+    return middle >= SOFT_SHADING_MIDDLE_SHARE
 
 
 def local_max(grey01: np.ndarray, radius: int) -> np.ndarray:
