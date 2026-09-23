@@ -500,6 +500,12 @@ STYLE_OPTIONS: tuple[tuple[str, str], ...] = (
 )
 
 
+#: What ``_committed_style`` holds when 处理图像 was off at import. It is not a
+#: style -- it marks that the picture went to the board untouched, so the
+#: publishing guard and the preview both know not to hand it a conversion.
+RAW_STYLE = "__raw__"
+
+
 def layer_options(side: str) -> list[tuple[str, tuple[str, ...], str]]:
     """How the artwork is realised in physical layers, for one board side.
 
@@ -1127,16 +1133,35 @@ def chrome_height(window: QWidget) -> int:
     Measured from the widgets rather than assumed, because the banner wraps to
     two lines when the window is narrow and a hard-coded offset would put the
     floating panels back on top of the tab row exactly then.
+
+    ⚠️ **A widget that has never been laid out reports a meaningless height.**
+    Before the window is shown, ``QToolBar.height()`` and friends answer with
+    Qt's default widget size -- 480 px here -- rather than their real one, so
+    this summed to 1470 on a 900 px window and put every floating panel below
+    the bottom edge. The panel was open, populated and correct, and completely
+    invisible; only the screenshots taken before ``show()`` could see it, which
+    is exactly the state a user must never be able to reach.
+
+    Unshown widgets therefore contribute their layout's own size hint. That is
+    approximate, but it is the right order of magnitude, so a panel lands on
+    screen and is re-placed precisely by the next resize or interaction.
     """
-    total = window.menuBar().height() if hasattr(window, "menuBar") else 0
+    def laid_out(widget) -> int:
+        return widget.height() if widget.isVisible() else widget.sizeHint().height()
+
+    total = laid_out(window.menuBar()) if hasattr(window, "menuBar") else 0
+
     for bar in window.findChildren(QToolBar):
-        total += bar.height()
+        total += laid_out(bar)
+
     row = window.findChild(QWidget, "ProjectTabRow")
     if row is not None:
-        total += row.height()
+        total += laid_out(row)
+
     banner = getattr(window, "_banner", None)
     if banner is not None:
-        total += banner.height()
+        total += laid_out(banner)
+
     return total
 
 
@@ -1942,6 +1967,11 @@ class PreprocessPanel(FloatingPanel):
         """
 
         self._committed_style: str = ""
+        self._raw_snapped: bool = False
+        """Whether the raw (unprocessed) import was snapped to pure black and
+        white. Only a two-colour picture is, and only then is there anything to
+        publish: a colour picture left unprocessed goes to the board exactly as
+        the file has it."""
 
         self._source_description: str = ""
         """The picture's own description, without the board suffix.
@@ -1983,7 +2013,31 @@ class PreprocessPanel(FloatingPanel):
         upload_layout.addWidget(self.source_note)
         layout.addWidget(upload, 1)
 
-        style_group = section("2 · 风格", compact=True)
+        # 处理图像 gates everything below it. A picture that is already flat
+        # black and white does not need tracing -- and tracing it is not
+        # harmless: the line-art pass thickens strokes and adds a silhouette
+        # ring the artwork never had. The switch is turned off for such a
+        # picture, so pressing 导入图片 puts the artwork on the board as it is.
+        process_group = section("2 · 处理图像", compact=True)
+        process_layout = QVBoxLayout(process_group)
+        process_layout.setContentsMargins(0, 0, 0, 0)
+        process_layout.setSpacing(2)
+        self.process_check = QCheckBox("处理图像（按下面的风格与参数）")
+        self.process_check.setChecked(True)
+        self.process_check.setToolTip(
+            "勾选：先按风格与参数处理，再放到画板上。\n"
+            "取消：图片原样放上去，不做任何处理。"
+        )
+        self.process_check.stateChanged.connect(self._on_process_toggled)
+        process_layout.addWidget(self.process_check)
+        self.process_note = QLabel()
+        self.process_note.setWordWrap(True)
+        self.process_note.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        process_layout.addWidget(self.process_note)
+        layout.addWidget(process_group)
+        self.process_group = process_group
+
+        style_group = section("3 · 风格", compact=True)
         style_layout = QVBoxLayout(style_group)
         style_layout.setContentsMargins(0, 0, 0, 0)
         style_layout.setSpacing(2)
@@ -1995,8 +2049,9 @@ class PreprocessPanel(FloatingPanel):
         self.style_note.setContentsMargins(104, 0, 0, 0)
         style_layout.addWidget(self.style_note)
         layout.addWidget(style_group)
+        self.style_group = style_group
 
-        layer_group = section("3 · 呈现方式", compact=True)
+        layer_group = section("4 · 呈现方式", compact=True)
         layer_layout = QVBoxLayout(layer_group)
         layer_layout.setContentsMargins(0, 0, 0, 0)
         layer_layout.setSpacing(2)
@@ -2024,6 +2079,7 @@ class PreprocessPanel(FloatingPanel):
         self.layer_note.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
         self.layer_note.setContentsMargins(104, 0, 0, 0)
         layer_layout.addWidget(self.layer_note)
+        self.layer_group = layer_group
 
         self.rule_note = QLabel()
         self.rule_note.setWordWrap(True)
@@ -2040,7 +2096,7 @@ class PreprocessPanel(FloatingPanel):
         # The tuning panel: every control here drives a live preview, so the
         # effect of a change is visible immediately instead of after a round
         # trip through the editor.
-        tune = section("4 · 线稿调试", compact=True)
+        tune = section("5 · 线稿调试", compact=True)
         self.tuning_section = tune
         tune_layout = QVBoxLayout(tune)
         tune_layout.setContentsMargins(0, 0, 0, 0)
@@ -2084,7 +2140,7 @@ class PreprocessPanel(FloatingPanel):
 
         layout.addWidget(tune)
 
-        denoise = section("5 · 降噪", compact=True)
+        denoise = section("6 · 降噪", compact=True)
         self.denoise_section = denoise
         denoise_layout = QVBoxLayout(denoise)
         denoise_layout.setContentsMargins(0, 0, 0, 0)
@@ -2153,7 +2209,7 @@ class PreprocessPanel(FloatingPanel):
         # so it sits outside 线稿调试. It used to live inside that section,
         # which meant picking 板画 hid the only way to open it -- the styles
         # that change the picture most had no way to inspect the result.
-        preview_group = section("7 · 预览", compact=True)
+        preview_group = section("8 · 预览", compact=True)
         self.preview_section = preview_group
         preview_layout_group = QVBoxLayout(preview_group)
         preview_layout_group.setContentsMargins(0, 0, 0, 0)
@@ -2214,7 +2270,7 @@ class PreprocessPanel(FloatingPanel):
         floats and millimetres, so the widgets carry integers and the
         conversion happens in :meth:`_board_art_params`.
         """
-        box = section("6 · 板画设置", compact=True)
+        box = section("7 · 板画设置", compact=True)
         layout = QVBoxLayout(box)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(3)
@@ -2411,7 +2467,13 @@ class PreprocessPanel(FloatingPanel):
         # two independent elements rather than the second taking over the
         # first. See ImagePlacement.import_id.
         self._import_id = uuid.uuid4().hex[:8]
-        self._committed_style = self._style()
+        # 处理图像 off means the board holds the picture itself, so the
+        # committed "style" records that rather than a style the conversion
+        # never ran. The publishing guard reads this, and treating a raw import
+        # as a styled one would let a later slider tick repaint it.
+        self._committed_style = (
+            self._style() if self.process_check.isChecked() else RAW_STYLE
+        )
         self._sync_placements()
         self._refresh_board_note()
 
@@ -2601,6 +2663,55 @@ class PreprocessPanel(FloatingPanel):
         width_px, height_px = self._source_size or (0, 0)
         return placement_for_pixels(self._source_path or "", width_px, height_px)
 
+    def _on_process_toggled(self) -> None:
+        """The 处理图像 switch moved: show or hide everything it gates."""
+        self._refresh_layers()
+        self._refresh_preview()
+        self._repaint_now()
+
+    def _apply_two_tone_default(self, path: str, bgr, alpha) -> None:
+        """Turn 处理图像 off by itself when the picture needs no processing.
+
+        A picture that is already flat black and white should go onto the board
+        as it is. Tracing it is not merely redundant: the line-art pass thickens
+        every stroke and adds a silhouette ring the artwork never had, and on a
+        drawing whose glyphs the tracer misreads (unusual letterforms, text with
+        counters) it loses parts of the picture outright.
+
+        ⚠️ **Suggestion, not a lock.** The switch is left live, so a user who
+        wants the traced version of a two-colour picture can simply tick it
+        again. Silently forcing a mode the user cannot override would be worse
+        than the problem being solved.
+
+        The picture is not altered here. Snapping it to pure black and white
+        happens at import, so what the canvas gets is exactly two values while
+        the uploaded file stays untouched.
+        """
+        from pcbart.image_prep import is_two_tone
+
+        try:
+            detected = is_two_tone(bgr)
+        except Exception:  # noqa: BLE001 - a detection failure must not block loading
+            detected = False
+
+        self._two_tone_source = detected
+        self.process_check.blockSignals(True)
+        self.process_check.setChecked(not detected)
+        self.process_check.blockSignals(False)
+
+        if detected:
+            self.process_note.setText(
+                "检测到这张图只有两种颜色，已取消「处理图像」："
+                "图片会原样放到画板上。需要线稿或板画效果时，勾选上方开关即可。"
+            )
+            self.process_note.setStyleSheet(f"color: {SUCCESS}; font-size: 11px;")
+        else:
+            self.process_note.setText(
+                "图片会被处理后再放到画板上；取消勾选则原样放置。"
+            )
+            self.process_note.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        self._refresh_layers()
+
     def _on_style_changed(self) -> None:
         """The 风格 combo moved: swap the preview over to the new style.
 
@@ -2738,6 +2849,7 @@ class PreprocessPanel(FloatingPanel):
         self._imported_path = None
         self._import_id = ""
         self._committed_style = ""
+        self._apply_two_tone_default(path, bgr, alpha)
         try:
             self._refresh_preview()
         except Exception as exc:  # noqa: BLE001 - report and roll back
@@ -2822,6 +2934,42 @@ class PreprocessPanel(FloatingPanel):
         working_bgr, working_alpha, work_scale = prepare_working_image(
             self._source_bgr, self._source_alpha
         )
+        if not self.process_check.isChecked():
+            # 处理图像 off: no tracing, no tone split. A two-colour picture is
+            # snapped to exactly black and white -- its edges carry JPEG or
+            # resize ringing, and those in-between values would otherwise reach
+            # the board as grey the silkscreen cannot print.
+            from pcbart.image_prep import is_two_tone, to_pure_two_tone
+
+            self._raw_snapped = bool(is_two_tone(working_bgr))
+            if self._raw_snapped:
+                processed = to_pure_two_tone(working_bgr, working_alpha)
+                if processed.ndim == 3 and processed.shape[2] == 3:
+                    processed = cv2.cvtColor(processed, cv2.COLOR_BGR2GRAY)
+            else:
+                # Left exactly as the file has it. Converting to grey here
+                # would be a silent edit to a picture the user asked not to
+                # touch.
+                processed = working_bgr
+            self._full_processed = processed
+            self._published_digest = None
+            self._place_on_canvas(
+                self._source_path,
+                self._source_bgr.shape[1],
+                self._source_bgr.shape[0],
+            )
+            self._publish_line_art(processed)
+            self._refresh_board_note()
+
+            canvas = main.design_canvas
+            canvas.fit_view()
+            self.import_note.setText(
+                "已原样导入画布（未处理）；改参数前请先勾选「处理图像」。"
+            )
+            self.import_note.setStyleSheet(f"color: {SUCCESS}; font-size: 11px;")
+            return True
+
+        self._raw_snapped = False
         try:
             processed = self._process(
                 working_bgr, working_alpha, param_scale=work_scale
@@ -3053,6 +3201,33 @@ class PreprocessPanel(FloatingPanel):
         preview_bgr, preview_alpha, preview_scale = prepare_working_image(
             self._source_bgr, self._source_alpha
         )
+
+        if not self.process_check.isChecked():
+            # 处理图像 off: the "result" is the picture itself, snapped to pure
+            # black and white when it is a two-colour artwork so the preview
+            # shows what will actually be placed.
+            from pcbart.image_prep import is_two_tone, to_pure_two_tone
+
+            try:
+                if is_two_tone(preview_bgr):
+                    processed = to_pure_two_tone(preview_bgr, preview_alpha)
+                    if processed.ndim == 3 and processed.shape[2] == 3:
+                        processed = cv2.cvtColor(processed, cv2.COLOR_BGR2GRAY)
+                else:
+                    processed = (
+                        cv2.cvtColor(preview_bgr, cv2.COLOR_BGR2GRAY)
+                        if preview_bgr.ndim == 3
+                        else preview_bgr
+                    )
+            except Exception as exc:  # noqa: BLE001 - surfaced to the user
+                self.tune_note.setText(f"图片读取失败：{exc}")
+                self.tune_note.setStyleSheet(f"color: {DANGER}; font-size: 11px;")
+                return
+            self._inline_processed = processed
+            self._show_in_drop_zone(processed, None, processed.shape[1], processed.shape[0], 0.0)
+            self._repaint_now()
+            return
+
         start = time.perf_counter()
         try:
             processed = self._process(
@@ -3208,6 +3383,9 @@ class PreprocessPanel(FloatingPanel):
                 f"黑 {board_art_result.black.mean() * 100:.0f}%"
             )
             label = "板画预览（白=丝印，黑=铜）"
+        elif not self.process_check.isChecked():
+            caption = f"{width} × {height} px　·　不做处理，原样放置"
+            label = "原图预览"
         elif self._style() == COLOR_STYLE:
             caption = (
                 f"{width} × {height} px　·　保留原图配色，不做线稿处理"
@@ -3257,7 +3435,13 @@ class PreprocessPanel(FloatingPanel):
         #
         # Slider tweaks keep the style, so this guard is invisible to the
         # behaviour it exists for: tuning still updates the imported artwork.
-        if self._style() != self._committed_style:
+        # A raw import carries no style, so the style comparison below does not
+        # apply to it; what matters is that the picture being published is the
+        # one that was placed, which the callers already guarantee.
+        if (
+            self._committed_style != RAW_STYLE
+            and self._style() != self._committed_style
+        ):
             return False
 
         # `preview` marks a display-resolution result. It is still written --
@@ -3272,6 +3456,20 @@ class PreprocessPanel(FloatingPanel):
         ]
         if not targets:
             return False
+
+        if self._committed_style == RAW_STYLE:
+            # A raw import normally has nothing derived from it, so nothing is
+            # written and the canvas falls back to the source file -- the same
+            # arrangement 彩色丝印 uses. The exception is a two-colour picture,
+            # which was snapped to exactly black and white: that result is what
+            # the board should carry, because the source's edge ringing would
+            # otherwise reach the vectoriser as extra mid-tones.
+            if not self._raw_snapped:
+                for placement in targets:
+                    placement.processed_path = ""
+                canvas._tinted_cache.clear()
+                canvas.update()
+                return True
 
         if self._committed_style == COLOR_STYLE:
             for placement in targets:
@@ -3440,6 +3638,27 @@ class PreprocessPanel(FloatingPanel):
         side = self._side()
         locked = style == COLOR_STYLE
         painting = style == BOARD_ART_STYLE
+        processing = self.process_check.isChecked()
+
+        # 处理图像 off means "put the picture on the board as it is", so there
+        # is nothing to configure and nothing to preview. Everything below the
+        # switch is hidden rather than disabled: a greyed-out panel of sliders
+        # still invites the user to go looking for how to turn them on.
+        if not processing:
+            for widget in (
+                self.style_group,
+                self.layer_group,
+                self.board_art_section,
+                self.tuning_section,
+                self.denoise_section,
+                self.preview_section,
+            ):
+                widget.setVisible(False)
+            self.process_note.setText("图片将原样放到画板上，不做任何处理。")
+            return
+
+        self.style_group.setVisible(True)
+        self.layer_group.setVisible(True)
 
         # Each style shows only the controls that do something to it. A knob
         # that quietly has no effect is the placeholder problem this panel has
