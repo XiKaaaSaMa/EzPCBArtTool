@@ -177,6 +177,16 @@ def main() -> int:
             "so an argument-free run never touches user material"
         ),
     )
+    parser.add_argument(
+        "--variant",
+        default="",
+        help=(
+            "name for a second artwork's set, appended to each filename as "
+            "-<variant> so it can sit beside the first (e.g. --variant feiyu). "
+            "Deliberately not a filename suffix: a leading dash would be read "
+            "as another option."
+        ),
+    )
     parser.add_argument("--only", action="append", choices=sorted(STATES))
     parser.add_argument("--width", type=int, default=1420)
     parser.add_argument("--height", type=int, default=900)
@@ -221,7 +231,9 @@ def main() -> int:
         STATES[name](window, app, image)
         app.processEvents()
 
-        target = outdir / f"{name}.png"
+        target = outdir / (
+            f"{name}-{args.variant}.png" if args.variant else f"{name}.png"
+        )
         # Only overwrite the states this run actually renders. Wiping the whole
         # folder first would make `--only 03-boardart` delete the other seven
         # pictures, which is a surprising way to lose the set you just made.
