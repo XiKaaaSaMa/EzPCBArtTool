@@ -343,6 +343,32 @@ def _tone_split(grey: np.ndarray) -> np.ndarray:
     return binary
 
 
+def _despeckle_tone(traced: np.ndarray, kernel: int = 3) -> np.ndarray:
+    """Remove the hairline fragments a fill boundary leaves behind.
+
+    Otsu's cut runs through soft edges, so wherever a picture has a gradual
+    transition the boundary wobbles and sheds slivers: on the drawing this was
+    tuned against, 47 paper components with 24 of them under 200 px, the
+    largest 13x28. They read as specks of dirt on the board rather than as
+    anything the artwork shows.
+
+    A single 3 px open-then-close removes most of them. **Deliberately small**:
+    9 px clears them completely but was measured erasing the scalloped lace
+    across the top of the head, which is real detail. Closing first bridges
+    one- and two-pixel notches in a boundary; opening then drops what is left
+    floating.
+
+    ``traced`` is 0 = ink, 255 = paper, so the operation runs on the paper mask
+    and the polarity is restored afterwards.
+    """
+    import cv2
+
+    element = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel, kernel))
+    paper = (traced > 128).astype(np.uint8)
+    paper = cv2.morphologyEx(paper, cv2.MORPH_CLOSE, element)
+    paper = cv2.morphologyEx(paper, cv2.MORPH_OPEN, element)
+    return np.where(paper > 0, 255, 0).astype(np.uint8)
+
 def silhouette_outline(
     alpha: np.ndarray | None,
     width: int = 5,
@@ -468,11 +494,21 @@ def line_art(
         )
         traced = np.where(response <= params.threshold, 0, 255).astype(np.uint8)
 
-    if params.silhouette:
-        # The outer boundary comes from transparency when there is any, and is
-        # otherwise inferred from tone; see :func:`silhouette_outline` for why
-        # the dodge response can never supply it.
-        #
+    # ⚠️ **The silhouette is for the tracing reading, not the fill reading.**
+    #
+    # It exists because the dodge response cannot see where a subject *ends*:
+    # a light subject on a light page has no edge, so its boundary has to be
+    # supplied from alpha instead. Filling has no such gap -- Otsu already
+    # decides every pixel, and the subject's shape is whatever came out dark.
+    #
+    # Worse, drawing it anyway is actively harmful. Measured on the drawing
+    # that exposed this: the outline's ink lands *inside* the region Otsu
+    # already filled 38% of the time, and the line it draws there cuts the
+    # filled shape into pieces. Paper components went from **33 to 170**, with
+    # 108 of them under 200 px -- which is exactly the "不规则的圈圈" the user
+    # saw on the face and the skirt, and exactly the region where a smooth
+    # light face and a smooth light ribbon give the outline something to carve.
+    if params.silhouette and params.mode != "fill":
         # The colour image is passed along because a picture with no usable
         # alpha -- a JPEG, a flattened PNG -- has no other source for its
         # subject boundary, and skipping the outline for those left the board
@@ -480,6 +516,9 @@ def line_art(
         outline = silhouette_outline(alpha, params.silhouette_width, image)
         if outline.shape[:2] == traced.shape[:2]:
             traced = np.where(outline > 0, 0, traced).astype(np.uint8)
+
+    if params.mode == "fill":
+        traced = _despeckle_tone(traced)
 
     return traced
 

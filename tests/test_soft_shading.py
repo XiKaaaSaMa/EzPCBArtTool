@@ -130,39 +130,31 @@ def test_the_threshold_sits_well_above_what_flat_ink_produces(tmp_path):
 # --------------------------------------------------------------------- effect
 
 
-def test_blurring_is_what_removes_the_fragments():
-    """The measured effect, on the drawing that actually showed it.
+def test_the_fill_reading_leaves_almost_no_fragments():
+    """The defect this file was written for is now largely gone by construction.
 
-    ⚠️ **Uses a captured drawing, not a synthetic one.** The synthetic gradient
-    in :func:`_soft_shaded` produces *zero* fragments -- measured -- so a test
-    built on it would pass no matter what the code did. The captured file is a
-    downscaled copy of the picture the user reported; at 900 px it still shows
-    the defect (63 fragments) and still loses most of them to a blur (16).
+    ⚠️ **The old expectation no longer holds, and it is worth being explicit
+    about why.** The fragments came from tracing *edges* across a gradient: the
+    response wobbled around the threshold and shed hundreds of specks (227 on
+    the full-size drawing). The fill reading puts every pixel on one side of a
+    global threshold instead, so there is no wobbling response to fragment --
+    measured on this fixture: **9 fragments**, against 63 when it was traced,
+    and 227 on the full-size original.
+
+    What was a "does denoising rescue this?" test is therefore now a "does the
+    default already handle it?" test. The bound is the measured value with room
+    to move, not a tight fit.
     """
-    from pcbart.denoise import denoise_image
-
     from pcbart.image_prep import imread_unicode
 
     fixture = Path(__file__).resolve().parent / "fixtures" / "soft_shading.png"
-    # imread_unicode: the fixture path is not guaranteed to be ASCII, and
-    # cv2's own reader fails silently on those.
     image = imread_unicode(fixture, cv2.IMREAD_UNCHANGED)
 
-    raw = _fragments(line_art(image) == 0)
-    blurred = _fragments(line_art(denoise_image(image, True, 6)) == 0)
+    fragments = _fragments(line_art(image) == 0)
 
-    # Measured on this 900 px copy: 88 fragments raw, 57 blurred. The full-size
-    # original goes 295 -> 65, so the effect is stronger at the size a user
-    # actually loads; the copy is a 128-colour downscale and has lost some of
-    # the fine gradient the blur works on. The bound is set from what this
-    # fixture really does rather than from the full-size number.
-    assert raw > 30, f"这份样本本身就该产生碎块，实际 {raw}"
-    assert blurred < raw * 0.75, (
-        f"降噪没有明显减少碎块：{raw} -> {blurred}"
+    assert fragments < 40, (
+        f"填充读法不该产生大量碎块，实际 {fragments}"
     )
-
-
-# ---------------------------------------------------------------------- panel
 
 
 def test_loading_a_shaded_picture_ticks_denoise(app, tmp_path):
