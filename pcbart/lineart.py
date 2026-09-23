@@ -77,8 +77,31 @@ class LineArtParams:
     lines; smaller values keep fine detail but risk washing out at print time.
     """
 
+    mode: str = "fill"
+    """How the picture is reduced to two tones.
+
+    ``"fill"`` -- **the current behaviour.** Otsu finds the split between the
+    picture's two main tones and every pixel is sent to one side: dark areas
+    become solid ink, light areas become solid paper. Shading, highlights and
+    line work all resolve to flat blocks, which is what the user asked for
+    after rejecting the edge-tracing reading: "把纯色部分直接做成填充色，
+    深浅色分别用黑白色直接替代".
+
+    ``"dodge"`` -- the earlier edge-tracing reading. It keeps only where a
+    pixel is darker than its neighbourhood, so a shaded area comes out as
+    contour lines rather than a filled shape. Kept because it is a genuinely
+    different picture, not because anything still defaults to it.
+
+    ⚠️ **Why fill won.** On the drawing that prompted the change, tracing gave
+    the hair as lines but left the face as bare paper: a light face on a light
+    background has no edge strong enough to trace, so it vanished into the
+    page. Filling gives the face a shape because the dark hair surrounding it
+    supplies the boundary.
+    """
     threshold: float = 0.46
     """Response level that separates ink from paper, 0..1.
+
+    Used by ``mode="dodge"`` only; ``mode="fill"`` takes its level from Otsu.
 
     Lower values put more of the image in ink; higher values keep only the
     strongest lines. Calibrated against a hand-made Photoshop reference of the
@@ -154,6 +177,7 @@ class LineArtParams:
             width -= 1
         return LineArtParams(
             strength=float(np.clip(self.strength, 0.2, 4.0)),
+            mode=str(self.mode),
             threshold=float(np.clip(self.threshold, 0.02, 0.98)),
             multiply_by_brightness=bool(self.multiply_by_brightness),
             silhouette=bool(self.silhouette),
@@ -294,6 +318,31 @@ def dodge_response(
     return dodge
 
 
+def _tone_split(grey: np.ndarray) -> np.ndarray:
+    """Reduce a picture to two flat tones with Otsu's threshold.
+
+    Every pixel goes to one side or the other, so the result tiles the frame:
+    the picture's own light areas become paper and its dark areas become solid
+    ink, with no gaps and no partial shading. That is the "深浅色分别用黑白色
+    直接替代" reading, and it is what keeps a shaded face visible -- its shape
+    comes from the dark hair around it rather than from an edge of its own.
+
+    **Otsu rather than a fixed level.** The right cut depends on the picture:
+    on the drawing this was tuned against Otsu lands at 179, where a fixed 128
+    would have swallowed the mid-tones that carry the face. Otsu finds the level
+    between whatever two tones the picture actually has, which is the same
+    reasoning already used for :func:`pcbart.image_prep.binarize`.
+
+    Returns ``uint8``, 0 where ink.
+    """
+    import cv2
+
+    _, binary = cv2.threshold(
+        grey, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )
+    return binary
+
+
 def silhouette_outline(
     alpha: np.ndarray | None,
     width: int = 5,
@@ -409,12 +458,15 @@ def line_art(
     image = _composite_on_white(image, alpha)
 
     grey = desaturate(image) / 255.0
-    radius = auto_radius(grey.shape, params.strength)
-    response = dodge_response(
-        grey, radius, multiply_by_brightness=params.multiply_by_brightness
-    )
 
-    traced = np.where(response <= params.threshold, 0, 255).astype(np.uint8)
+    if params.mode == "fill":
+        traced = _tone_split((grey * 255).astype(np.uint8))
+    else:
+        radius = auto_radius(grey.shape, params.strength)
+        response = dodge_response(
+            grey, radius, multiply_by_brightness=params.multiply_by_brightness
+        )
+        traced = np.where(response <= params.threshold, 0, 255).astype(np.uint8)
 
     if params.silhouette:
         # The outer boundary comes from transparency when there is any, and is

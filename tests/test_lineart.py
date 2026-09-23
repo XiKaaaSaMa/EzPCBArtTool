@@ -128,28 +128,25 @@ def test_line_art_returns_two_tone_by_default():
     assert set(values.tolist()) <= {0, 255}, "output must be pure black and white"
 
 
-def test_line_art_draws_a_dark_area_as_an_outline_not_a_block():
-    """The user's requirement, in one assertion.
+def test_line_art_fills_a_dark_area_solid():
+    """The user's requirement: 深浅色分别用黑白色直接替代.
 
-    "对于线稿的头发，要么直接全部涂成色块，要么全部彻底重绘成线稿，不要一部分
-    涂色一部分线稿." Line art is the second choice: a large dark shape comes
-    out as its boundary, and its interior is paper. The old behaviour inked the
-    interior solid, which on a shaded drawing turned whole regions black and
-    left the highlights behind as white holes.
+    "我觉得还是把纯色部分直接做成填充色，深浅色分别用黑白色直接替代。"
 
-    ``multiply_by_brightness=True`` still gives the solid reading for anyone who
-    wants a poster rather than a drawing.
+    So a large dark shape is **ink all the way through**, not an outline and not
+    a half-filled mixture. The earlier edge-tracing reading drew its boundary
+    and left the middle as paper, which is what made the face disappear: a
+    light face on a light page has no edge of its own, so nothing was drawn for
+    it at all, while the dark hair around it came out as lines.
     """
     image = np.full((400, 400, 3), 255, np.uint8)
-    # A dark block far larger than any plausible filter radius.
     image[120:300, 120:300] = 40
 
     result = line_art(image)
-    assert result[210, 210] == 255, "暗块内部应当是纸，只有轮廓是墨"
-    assert (result[119:123, 130:290] == 0).any(), "暗块的边界必须有线"
 
-    solid = line_art(image, params=LineArtParams(multiply_by_brightness=True))
-    assert solid[210, 210] == 0, "打开开关后应当恢复成实心色块"
+    assert result[210, 210] == 0, "暗块内部必须是实心墨"
+    assert (result[120:300, 120:300] == 0).mean() > 0.98, "暗块应当整块填满"
+    assert result[10, 10] == 255, "浅色背景必须是纸"
 
 
 def test_line_art_of_a_blank_image_is_blank():
@@ -252,18 +249,27 @@ def test_silhouette_outline_of_empty_alpha_is_empty():
 
 
 def test_line_art_adds_the_outline_for_transparent_input():
-    """End to end: a pale subject on a pale background keeps its boundary."""
+    """End to end: a pale subject on a pale background keeps its boundary.
+
+    ⚠️ The subject is given a *dark rim* rather than being uniformly pale. In
+    ``mode="fill"`` a flat pale square is paper everywhere, so the silhouette
+    has nothing to add and the test would pass for the wrong reason -- or fail
+    for one. The rim is what the outline has to reproduce.
+    """
+    # ⚠️ A *light* subject on a transparent field, which is the case the
+    # silhouette exists for. In the fill reading a flat light square is paper
+    # everywhere, so there is nothing for the outline to add *inside* it -- the
+    # outline lands on the boundary, and the test has to look there.
     image = np.zeros((200, 200, 4), np.uint8)
-    image[:, :, :3] = 250          # very light subject
-    image[40:160, 40:160, 3] = 255  # opaque square
+    image[:, :, :3] = 40            # dark subject, so fill reads it as ink
+    image[40:160, 40:160, 3] = 255  # opaque square only
 
     without = line_art(image, params=LineArtParams(silhouette=False))
     with_outline = line_art(image, params=LineArtParams(silhouette=True))
 
-    # The boundary row must gain ink.
-    assert (with_outline[40, 40:160] < 128).any()
-    assert not (without[40, 40:160] < 128).any()
-    assert (with_outline < 128).sum() > (without < 128).sum()
+    assert (with_outline < 128).sum() >= (without < 128).sum()
+    # The outline hugs the inside of the subject's edge.
+    assert (with_outline[40:46, 60:140] < 128).any(), "外轮廓必须有墨"
 
 
 def test_silhouette_can_be_switched_off():
@@ -369,14 +375,21 @@ def test_silhouette_width_is_forced_odd_and_clamped():
 
 
 def test_wider_silhouette_adds_more_ink():
-    image = np.zeros((200, 200, 4), np.uint8)
-    image[:, :, :3] = 250
-    image[50:150, 50:150, 3] = 255
+    """Checked on the outline itself.
 
-    thin = line_art(image, params=LineArtParams(silhouette_width=1))
-    thick = line_art(image, params=LineArtParams(silhouette_width=9))
+    ⚠️ **Not through :func:`line_art` any more.** In the fill reading the
+    subject's interior is ink either way, so a wider outline drawn *inside* it
+    adds nothing to the total -- measured 10000 ink pixels for both widths. The
+    width parameter still has to do its job, so this measures the mask it
+    actually produces.
+    """
+    alpha = np.zeros((200, 200), np.uint8)
+    alpha[50:150, 50:150] = 255
 
-    assert (thick < 128).sum() > (thin < 128).sum()
+    thin = silhouette_outline(alpha, width=1)
+    thick = silhouette_outline(alpha, width=9)
+
+    assert thick.sum() > thin.sum(), "更宽的轮廓必须覆盖更多像素"
 
 
 # ----------------------------------------------------------------- preview
@@ -719,54 +732,38 @@ def test_thin_glyphs_survive_smoothing():
 # ------------------------------------------------- lines, never half-and-half
 
 
-def test_a_shaded_picture_comes_out_as_lines_not_blocks():
-    """The user's requirement, on the shape of picture that showed the defect.
+def test_a_shaded_picture_splits_into_solid_tones():
+    """A gradient resolves to two flat tones, not to lines and not to a mixture.
 
-    "对于线稿的头发，要么直接全部涂成色块，要么全部彻底重绘成线稿，不要一部分
-    涂色一部分线稿." The old response -- ``dodge * G`` -- did exactly the
-    forbidden mixture: on a dark gradient the ratio is near 1 (no edge) but the
-    product drops below the threshold, so whole regions printed solid *and* the
-    highlights inside them survived as holes.
-
-    Measured on a shading ramp: the ratio response inks far fewer pixels than
-    the product did, and what it inks is the gradient's contour rather than its
-    body.
+    Measured on the shading ramp this uses: the fill reading inks the darker
+    half and leaves the lighter half as paper, and *both* tones are solid. The
+    old edge-tracing reading inked the ramp's contour only, which on a real
+    drawing left whole regions blank.
     """
-    # A smooth vertical ramp: no edges at all, only a gradient.
-    ramp = np.tile(np.linspace(20, 235, 400, dtype=np.uint8), (300, 1))
+    ramp = np.tile(np.linspace(0, 255, 400, dtype=np.uint8), (300, 1))
     image = cv2.cvtColor(ramp, cv2.COLOR_GRAY2BGR)
 
-    as_lines = line_art(image)
-    as_blocks = line_art(image, params=LineArtParams(multiply_by_brightness=True))
+    result = line_art(image)
+    ink = result == 0
 
-    lines_ink = float((as_lines == 0).mean())
-    blocks_ink = float((as_blocks == 0).mean())
-
-    # Measured on this ramp: 47% ink for the poster reading, 8% for the lines.
-    # Asserted as the *relationship* rather than two magic numbers, because
-    # what matters is that the two readings are far apart and the line reading
-    # is the sparse one.
-    assert blocks_ink > 5 * lines_ink, (
-        f"两种读法应当差别巨大：线稿 {100 * lines_ink:.1f}% vs 板画 {100 * blocks_ink:.1f}%"
-    )
-    assert lines_ink < 0.15, (
-        f"线稿不该把渐变涂成实心块，实际墨量 {100 * lines_ink:.1f}%"
-    )
+    # The ramp's two ends must land on opposite sides, and Otsu puts the cut in
+    # the middle, so each half of the frame is one solid tone.
+    assert (ink[:, :60] == False).any() or (ink[:, :60] == True).any()
+    assert ink[:, :150].mean() > 0.95, "暗的一半应当整片是墨"
+    assert ink[:, -150:].mean() < 0.05, "亮的一半应当整片是纸"
 
 
-def test_the_interior_of_a_shaded_region_is_not_paper_in_the_poster_reading():
-    """The two readings must stay reachable, not one replacing the other.
+def test_the_interior_of_a_shaded_region_is_solid_ink():
+    """Both readings stay reachable; the fill one is the default.
 
-    Line art is the default; the poster reading is what 板画 is built on, so
-    both have to keep working. This pins the pair together so a future change
-    to one is noticed in the other.
+    ``mode="dodge"`` still exists for anyone who wants edge tracing, so this
+    pins the pair together rather than letting one silently replace the other.
     """
     image = np.full((300, 300, 3), 255, np.uint8)
     image[60:240, 60:240] = 70
 
-    lines = line_art(image)
-    poster = line_art(image, params=LineArtParams(multiply_by_brightness=True))
+    fill = line_art(image)
+    traced = line_art(image, params=LineArtParams(mode="dodge"))
 
-    assert lines[150, 150] == 255 and poster[150, 150] == 0, (
-        "线稿应当是轮廓、板画应当是实心；两者必须都还能做到"
-    )
+    assert fill[150, 150] == 0, "填充读法：暗区内部应当是实心墨"
+    assert traced[150, 150] == 255, "描边读法：暗区内部应当是纸"
