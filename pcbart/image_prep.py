@@ -293,6 +293,14 @@ def subject_mask(
     what turns a line drawing into a footprint: the strokes already enclose the
     character, so everything they enclose *is* the character.
 
+    **Everything the picture contains is kept, not just the biggest piece.** A
+    poster with a character, a mug, a bottle and a title is four subjects; the
+    board should carry four shapes, and only shapes that sit inside a larger
+    one are dropped (an eye inside a face is part of the face). Handing back
+    only the largest piece threw the rest away, and welding them together first
+    is what drew the connecting lines this function used to produce; see
+    :func:`_adaptive_gap` for how the two cases are told apart.
+
     Returns ``uint8`` valued 0/1, or ``None`` when there is nothing usable.
     """
     import cv2
@@ -348,20 +356,8 @@ def subject_mask(
             base, max_thickness=max(1, int(round(3 * scale)))
         )
 
-    # Bridge the gaps between strokes so the subject reads as one solid shape.
-    #
-    # The kernel has to span the *drawing's* stroke spacing, not a pixel or
-    # two: pencil lines at the crown of the head were separated by roughly 4%
-    # of the picture, and anything smaller let the fill leak straight out
-    # through them. A closing this wide is safe here because it only fills
-    # gaps between nearby strokes; the fill stage still decides what counts as
-    # enclosed. Being a fraction of the picture, it carries across the
-    # reduction unchanged.
-    gap = _odd(max(3, int(min(height, width) * 0.045)))
     base = cv2.morphologyEx(
-        base,
-        cv2.MORPH_CLOSE,
-        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (gap, gap)),
+        base, cv2.MORPH_CLOSE, _ellipse(_adaptive_gap(base))
     )
 
     if fill:
@@ -373,7 +369,7 @@ def subject_mask(
             filled = base
         base = filled
 
-    subject = _largest_component(base)
+    subject = _outer_components(base)
     if subject is None or not subject.any():
         return None
 
@@ -381,18 +377,17 @@ def subject_mask(
     # filaments that survive filling -- strands of hair, the gaps between
     # fingers. Without this the board edge grows whiskers wherever two strokes
     # nearly meet, which is what the user saw on the hair and the hand.
+    #
+    # **Each piece is smoothed on its own, never the whole mask at once.** The
+    # kernel is wide enough to reshape a silhouette, so closing the combined
+    # mask bridges the background *between* separate things: measured on the
+    # poster that exposed this, a 13 px close took the character-plus-mug from
+    # two pieces of 289k and 35k pixels to a single 343k blob, and the board
+    # outline then ran through the space between them. Smoothing one piece at a
+    # time cannot do that -- there is nothing else in the picture to merge with.
     smooth = _odd(max(3, int(min(height, width) * 0.015)))
-    subject = cv2.morphologyEx(
-        subject,
-        cv2.MORPH_OPEN,
-        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (smooth, smooth)),
-    )
-    subject = cv2.morphologyEx(
-        subject,
-        cv2.MORPH_CLOSE,
-        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (smooth, smooth)),
-    )
-    subject = _largest_component(subject)
+    subject = _smooth_each_component(subject, _ellipse(smooth))
+    subject = _outer_components(subject)
     if subject is None:
         return None
 
@@ -628,6 +623,190 @@ def _largest_component(mask: np.ndarray) -> np.ndarray | None:
     if stats[biggest, cv2.CC_STAT_AREA] <= 0:
         return None
     return (labels == biggest).astype(np.uint8)
+
+
+#: Closing kernel used when the artwork's outlines already close on their own,
+#: as a fraction of the short side. Small on purpose: at this size the kernel
+#: only tidies pixel-level gaps, and the separate things in the picture -- a
+#: character, a mug, a bottle, a title -- stay separate.
+MULTI_ELEMENT_GAP_RATIO = 0.006
+
+#: Closing kernel used when they do not, as a fraction of the short side. Big
+#: on purpose: pencil lines at the crown of the head of a real drawing were
+#: separated by roughly 4% of the picture, and anything smaller let the fill
+#: leak straight out through them.
+BRIDGE_GAP_RATIO = 0.045
+
+#: How much of the wide-kernel result the narrow one has to reproduce before
+#: the picture is taken to be self-closing. Measured: pictures whose outlines
+#: close score 0.94-0.99, hand-drawn line art with real gaps scores 0.58-0.72.
+#: The gap between those groups is wide enough that the exact cut does not
+#: matter.
+SELF_CLOSING_COVERAGE = 0.85
+
+
+def _ellipse(size: int) -> "np.ndarray":
+    import cv2
+
+    return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
+
+
+def _adaptive_gap(mask: np.ndarray) -> int:
+    """How wide a closing kernel this picture actually needs.
+
+    A single fixed kernel cannot serve both pictures this tool has to handle,
+    and using the wide one everywhere is what produced the defect this
+    replaces: on a poster holding several separate things, a kernel sized to
+    bridge a drawing's pencil gaps also bridges the *background* between the
+    character and the mug beside it. Everything became one blob, the outline
+    ran straight across the empty space, and the user saw connecting lines
+    that are not in the picture.
+
+    Both cases are self-describing, so nothing has to be asked of the user.
+    Close the mask with a narrow kernel and with a wide one, fill both, and
+    compare: if the outlines already close, the narrow kernel reproduces
+    almost all of the wide result -- 94% or better on the pictures measured,
+    because the wide kernel has nothing left to bridge. If they do not close,
+    the narrow fill leaks out and the two results diverge sharply (58-72%),
+    and the wide kernel is needed.
+
+    Returns an odd kernel width in pixels.
+    """
+    import cv2
+    import numpy as np
+
+    height, width = mask.shape[:2]
+    short = min(height, width)
+
+    narrow = _odd(max(3, int(short * MULTI_ELEMENT_GAP_RATIO)))
+    wide = _odd(max(3, int(short * BRIDGE_GAP_RATIO)))
+    if narrow == wide:
+        return wide
+
+    def filled(kernel: int) -> "np.ndarray":
+        closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, _ellipse(kernel))
+        return _fill_enclosed_holes(closed) > 0
+
+    narrow_fill = filled(narrow)
+    wide_fill = filled(wide)
+    wide_area = int(wide_fill.sum())
+    if wide_area == 0:
+        return wide
+
+    covered = int(np.logical_and(narrow_fill, wide_fill).sum()) / wide_area
+    return narrow if covered >= SELF_CLOSING_COVERAGE else wide
+
+
+def _smooth_each_component(mask: np.ndarray, kernel: "np.ndarray") -> np.ndarray:
+    """Morphological open-then-close, applied to every piece separately.
+
+    Housekeeping on the *shape* of each piece: it takes off the single-pixel
+    staircase a threshold leaves behind and closes pinholes inside a silhouette.
+
+    Applied to the whole mask instead, the closing half does something else as
+    well: it bridges any two pieces closer together than the kernel, which is
+    exactly how the separate things in a picture got welded back together after
+    being carefully kept apart. There is no threshold that avoids this -- the
+    kernel has to be wide enough to reshape a silhouette, and pieces standing a
+    silhouette-width apart are what "separate" looks like.
+    """
+    import cv2
+    import numpy as np
+
+    count, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+        mask.astype(np.uint8), connectivity=8
+    )
+    if count <= 1:
+        return mask
+
+    out = np.zeros(mask.shape[:2], np.uint8)
+    for index in range(1, count):
+        piece = (labels == index).astype(np.uint8)
+        piece = cv2.morphologyEx(piece, cv2.MORPH_OPEN, kernel)
+        piece = cv2.morphologyEx(piece, cv2.MORPH_CLOSE, kernel)
+        out |= piece
+    return out
+
+
+def _outer_components(
+    mask: np.ndarray,
+    *,
+    min_abs_px: int = 16,
+    min_fraction_of_largest: float = 0.002,
+) -> np.ndarray | None:
+    """Every shape in the mask that is not sitting inside another one.
+
+    The counterpart to :func:`_largest_component`. Keeping only the biggest
+    dropped a poster's mug, bottle and title; keeping *everything* instead
+    would draw an outline around each eye and each letter of a speech bubble,
+    because those are separate ink too. What distinguishes them is nesting:
+    real content sits beside the subject, decoration sits within it.
+
+    Nesting is decided by filling each piece's own holes and asking whether the
+    result lies inside a bigger piece's filled area -- not by comparing
+    bounding boxes, which cannot tell a mug beside a character from a mug in
+    front of one.
+
+    Specks are still dropped, by absolute area and relative to the largest
+    piece, so scanner noise does not become a board.
+    """
+    import cv2
+    import numpy as np
+
+    count, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+        mask.astype(np.uint8), connectivity=8
+    )
+    if count <= 1:
+        return None
+
+    order = sorted(
+        range(1, count),
+        key=lambda i: stats[i, cv2.CC_STAT_AREA],
+        reverse=True,
+    )
+    largest = stats[order[0], cv2.CC_STAT_AREA]
+    floor = max(min_abs_px, int(largest * min_fraction_of_largest))
+
+    usable = [i for i in order if stats[i, cv2.CC_STAT_AREA] >= floor]
+    if not usable:
+        return None
+
+    # Filling each piece's own holes is what makes containment meaningful: the
+    # eye strokes alone are a thin ring, and a thin ring is not "inside" the
+    # face until it is filled to the area it visually occupies.
+    footprints = {
+        i: _fill_enclosed_holes((labels == i).astype(np.uint8)) > 0
+        for i in usable
+    }
+    areas = {i: int(footprints[i].sum()) for i in usable}
+
+    keep: list[int] = []
+    for position, i in enumerate(usable):
+        x_i, y_i, w_i, h_i, _ = stats[i]
+        enclosed = False
+        for j in usable[:position]:          # only larger pieces can contain it
+            x_j, y_j, w_j, h_j, _ = stats[j]
+            if (
+                x_i < x_j
+                or y_i < y_j
+                or x_i + w_i > x_j + w_j
+                or y_i + h_i > y_j + h_j
+            ):
+                continue                       # bbox rules containment out
+            overlap = int(np.logical_and(footprints[i], footprints[j]).sum())
+            if overlap / max(areas[i], 1) > 0.95:
+                enclosed = True
+                break
+        if not enclosed:
+            keep.append(i)
+
+    if not keep:
+        return None
+
+    out = np.zeros(mask.shape[:2], np.uint8)
+    for i in keep:
+        out |= (labels == i).astype(np.uint8)
+    return out
 
 
 def preprocess(

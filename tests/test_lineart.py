@@ -468,3 +468,185 @@ def test_the_subject_mask_of_a_framed_drawing_is_not_the_whole_canvas():
     ys, xs = np.where(mask > 0)
     assert ys.min() > 40, "轮廓应贴合主体而不是从画框开始"
     assert xs.min() > 20
+
+
+# ------------------------------------------------- separate things in a picture
+
+
+def _poster() -> np.ndarray:
+    """A character, three letters and a mug beside it, on white.
+
+    Every piece has its own closed outline. This is the shape of picture that
+    exposed the connecting-line defect: a drawing holding several *separate*
+    things, which the outline pass used to weld into one blob.
+    """
+    image = np.full((520, 520, 3), 255, np.uint8)
+    cv2.ellipse(image, (240, 320), (120, 110), 0, 0, 360, (0, 0, 0), 5)
+    cv2.circle(image, (240, 320), 30, (0, 0, 0), 3)
+    for index, letter in enumerate("ABC"):
+        cv2.putText(
+            image,
+            letter,
+            (120 + index * 90, 90),
+            cv2.FONT_HERSHEY_DUPLEX,
+            2.2,
+            (0, 0, 0),
+            5,
+        )
+    cv2.circle(image, (470, 300), 30, (0, 0, 0), 4)
+    return image
+
+
+def test_every_separate_thing_in_a_picture_keeps_its_own_outline():
+    """Not just the biggest piece: the mug and the letters are subjects too.
+
+    Keeping only the largest component threw them away; welding them together
+    first is what drew lines across the empty background between them. Both
+    failures look like "the outline is wrong", so the count is asserted rather
+    than just the coverage.
+    """
+    from pcbart.image_prep import subject_mask
+
+    mask = subject_mask(_poster(), None, fill=True)
+    assert mask is not None
+
+    count, _labels, stats, centroids = cv2.connectedComponentsWithStats(
+        mask.astype(np.uint8), connectivity=8
+    )
+    assert count - 1 == 5, (
+        f"应保留 5 个独立元素（主体 + 三个字母 + 杯子），实际 {count - 1}"
+    )
+
+    # 每个元素都要落在它该在的位置，而不是被并成一块
+    centres = sorted(tuple(np.round(centroids[i]).astype(int)) for i in range(1, count))
+    assert any(abs(y - 67) < 15 for _x, y in centres), "文字那一行丢了"
+    assert any(x > 430 for x, _y in centres), "旁边的杯子丢了"
+
+
+def test_the_outline_does_not_cross_the_empty_space_between_elements():
+    """The reported defect, measured directly.
+
+    Bridging everything into one blob meant the traced boundary ran through
+    the background between the character and the mug. Sampling the gaps is what
+    catches that; the element count above would still be right if the pieces
+    were joined by a one-pixel thread.
+    """
+    from pcbart.image_prep import subject_mask
+
+    mask = np.asarray(subject_mask(_poster(), None, fill=True))
+
+    # 主体右缘约在 x=360，杯子左缘约在 x=440；中间这条竖带是背景。
+    band = mask[:, 390:425]
+    assert band.mean() < 0.05, (
+        f"主体与杯子之间被填上了（该带前景 {100 * band.mean():.1f}%）"
+    )
+
+
+def _dashed_ring(size: int = 420, radius: int = 110) -> np.ndarray:
+    """A circle whose outline is broken into visibly separate strokes.
+
+    This is the failure mode of hand-drawn line art: not one wide gap, but
+    many strokes that stop just short of each other. The fill leaks out
+    through every one of them unless they are bridged.
+    """
+    image = np.full((size, size, 3), 255, np.uint8)
+    segments = 8
+    gap_fraction = 0.04
+    step = 2 * np.pi / segments
+    for index in range(segments):
+        first = index * step + step * gap_fraction
+        last = (index + 1) * step - step * gap_fraction
+        points = np.array(
+            [
+                [
+                    int(size / 2 + radius * np.cos(t)),
+                    int(size / 2 + radius * np.sin(t)),
+                ]
+                for t in np.linspace(first, last, 40)
+            ],
+            np.int32,
+        )
+        cv2.polylines(image, [points], False, (0, 0, 0), 3)
+    return image
+
+
+def test_hand_drawn_outlines_still_get_bridged():
+    """The other half of the bargain: a drawing with real gaps must not regress.
+
+    The adaptive kernel exists to tell these two cases apart. If it ever picks
+    the narrow one here, the fill leaks out through the stroke breaks and the
+    subject collapses to just its strokes.
+    """
+    from pcbart.image_prep import _adaptive_gap, _base_subject_mask, subject_mask
+
+    image = _dashed_ring()
+    base = _base_subject_mask(image, None).astype(np.uint8)
+    short = min(base.shape)
+    wide = max(3, int(short * 0.045)) | 1
+    assert _adaptive_gap(base) == wide, "有断笔的线稿应当选用宽核"
+
+    mask = subject_mask(image, None, fill=True)
+    assert mask is not None
+    assert mask.mean() > 0.15, "断笔没被桥接，填充从缺口漏了出去"
+
+
+def test_a_picture_whose_outlines_already_close_uses_the_narrow_kernel():
+    """The counterpart to the test above, so the cut between them is pinned."""
+    from pcbart.image_prep import _adaptive_gap, _base_subject_mask
+
+    base = _base_subject_mask(_poster(), None).astype(np.uint8)
+    short = min(base.shape)
+    narrow = max(3, int(short * 0.006)) | 1
+    assert _adaptive_gap(base) == narrow
+
+
+def test_line_art_does_not_draw_the_gaps_closed():
+    """End to end on the defect the user reported: "连接件" between elements.
+
+    The silhouette pass runs off ``subject_mask``, so once that welded the
+    picture's separate pieces together the outline was traced across the empty
+    background -- a line the source never had. Asserting on the mask alone
+    would miss it, so this checks the picture that actually gets drawn.
+    """
+    from pcbart.image_prep import subject_mask
+
+    image = _poster()
+    mask = np.asarray(subject_mask(image, None, fill=False)).astype(np.uint8)
+
+    # 把掩膜画成轮廓（与 silhouette_outline 同样的做法）
+    edge = cv2.morphologyEx(mask, cv2.MORPH_GRADIENT, np.ones((3, 3), np.uint8))
+    edge = cv2.dilate(edge, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
+    outline = (edge & mask).astype(np.uint8)
+
+    # 主体与杯子之间的竖带里，除了各自的边，不该有横向的连接线
+    band = outline[:, 390:425]
+    assert band.mean() < 0.05, (
+        f"主体和杯子之间被画上了连接线（该带 {100 * band.mean():.1f}% 有墨）"
+    )
+
+
+def test_smoothing_does_not_weld_the_pieces_back_together():
+    """The step that undid the rest of the work, caught directly.
+
+    Smoothing runs after the pieces have been separated, and the closing half
+    of open-then-close bridges anything closer than the kernel. Applied to the
+    combined mask it re-merged the character and the mug -- 289k and 35k pixels
+    became one 343k blob -- and the outline then crossed the space between
+    them again. Per-piece smoothing cannot merge anything, so the count is the
+    assertion.
+    """
+    from pcbart.image_prep import _outer_components, _smooth_each_component
+
+    mask = np.zeros((240, 400), np.uint8)
+    cv2.rectangle(mask, (20, 60), (160, 200), 1, -1)     # 主体
+    cv2.rectangle(mask, (190, 90), (260, 170), 1, -1)    # 旁边的小元素，相距 30px
+
+    before = cv2.connectedComponentsWithStats(mask.astype(np.uint8), 8)[0] - 1
+    assert before == 2
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (41, 41))
+    smoothed = _smooth_each_component(_outer_components(mask), kernel)
+
+    after = cv2.connectedComponentsWithStats(smoothed.astype(np.uint8), 8)[0] - 1
+    assert after == 2, f"平滑后两个元素被焊在一起了（{before} -> {after}）"
+    assert smoothed[130, 175] == 0, "两个元素之间的背景被填上了"
