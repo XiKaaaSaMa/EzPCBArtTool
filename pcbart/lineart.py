@@ -106,6 +106,30 @@ class LineArtParams:
     deliberately produced, which made the two impossible to tune apart.
     """
 
+    multiply_by_brightness: bool = False
+    """Whether the response is scaled by the pixel's own brightness.
+
+    **Off is the line-art behaviour; on is the poster behaviour.** The two ask
+    different questions and a picture cannot answer both at once:
+
+    * ``False`` -- "is this pixel an edge?" The response is the dodge *ratio*
+      ``G / local_max(G)``, which is near 1 across any flat area, however dark,
+      and dips only where a pixel is darker than its neighbourhood. A shaded
+      region therefore comes out as a few contour lines, which is what a line
+      drawing is.
+    * ``True`` -- "is this pixel dark?" Multiplying by ``G`` folds absolute
+      brightness back in, so a dark region crosses the threshold wholesale and
+      comes out as a solid block. That is the poster reading, and
+      :func:`pcbart.boardart.board_art` is where it belongs.
+
+    ⚠️ **This default used to be ``True``, and it is what broke shaded
+    artwork.** Measured on the drawing that exposed it, the hair is a smooth
+    dark gradient: its dodge ratio has a median of 0.968 (essentially no edge
+    anywhere), yet ``dodge * G`` has a median of 0.465, so **41.5% of the hair
+    fell below the threshold and printed as solid black** -- with the highlights
+    left behind as white holes. The user described the result exactly: "一部分
+    涂色一部分线稿".
+    """
     silhouette: bool = True
     """Add the subject's outer outline, taken from transparency.
 
@@ -131,6 +155,7 @@ class LineArtParams:
         return LineArtParams(
             strength=float(np.clip(self.strength, 0.2, 4.0)),
             threshold=float(np.clip(self.threshold, 0.02, 0.98)),
+            multiply_by_brightness=bool(self.multiply_by_brightness),
             silhouette=bool(self.silhouette),
             silhouette_width=int(np.clip(width, 1, 31)),
             denoise=False,
@@ -249,11 +274,24 @@ def local_max(grey01: np.ndarray, radius: int) -> np.ndarray:
     return 1.0 - cv2.erode(inverted, kernel)
 
 
-def dodge_response(grey01: np.ndarray, radius: int) -> np.ndarray:
-    """``(G / local_max(G)) * G`` in 0..1, before the Levels step."""
+def dodge_response(
+    grey01: np.ndarray,
+    radius: int,
+    multiply_by_brightness: bool = False,
+) -> np.ndarray:
+    """``G / local_max(G)`` in 0..1, before the Levels step.
+
+    This is the dodge *ratio*: how much darker a pixel is than the brightest
+    pixel near it. Being a ratio, it is near 1 across any flat area whatever its
+    absolute level, so it answers "is there an edge here?" and not "is this
+    dark?" -- see :attr:`LineArtParams.multiply_by_brightness` for why line art
+    wants the first question and why the old default asked the second.
+    """
     maximum = np.maximum(local_max(grey01, radius), 1e-6)
     dodge = np.clip(grey01 / maximum, 0.0, 1.0)
-    return np.clip(dodge * grey01, 0.0, 1.0)
+    if multiply_by_brightness:
+        return np.clip(dodge * grey01, 0.0, 1.0)
+    return dodge
 
 
 def silhouette_outline(
@@ -372,7 +410,9 @@ def line_art(
 
     grey = desaturate(image) / 255.0
     radius = auto_radius(grey.shape, params.strength)
-    response = dodge_response(grey, radius)
+    response = dodge_response(
+        grey, radius, multiply_by_brightness=params.multiply_by_brightness
+    )
 
     traced = np.where(response <= params.threshold, 0, 255).astype(np.uint8)
 

@@ -86,21 +86,23 @@ def test_local_max_finds_a_bright_spot_in_a_dark_field():
 # ------------------------------------------------------------- the response
 
 
-def test_dodge_response_alone_whitens_a_large_dark_area():
-    """The defect the multiply term exists to fix.
+def test_the_response_is_a_ratio_so_a_flat_area_reads_as_no_edge():
+    """The default: a flat region has no edge, however dark it is.
 
-    Inside a uniform black region every pixel equals its own local maximum, so
-    the plain dodge ratio is 1 regardless of how dark the region is.
+    Inside a uniform dark region every pixel equals its own local maximum, so
+    the ratio is 1 there. That is the *point* -- it is what keeps a shaded
+    picture as contour lines instead of a solid block. See
+    :attr:`LineArtParams.multiply_by_brightness` for the other reading.
     """
     grey = np.full((120, 120), 0.2, np.float32)
-    dodge_only = np.clip(grey / np.maximum(local_max(grey, radius=5), 1e-6), 0, 1)
-    assert dodge_only[60, 60] == pytest.approx(1.0)
-
-
-def test_response_keeps_a_large_dark_area_dark():
-    """Multiplying by the original grey restores absolute darkness."""
-    grey = np.full((120, 120), 0.2, np.float32)
     response = dodge_response(grey, radius=5)
+    assert response[60, 60] == pytest.approx(1.0)
+
+
+def test_multiplying_by_brightness_restores_the_poster_reading():
+    """Opt in, and a dark area crosses the threshold wholesale again."""
+    grey = np.full((120, 120), 0.2, np.float32)
+    response = dodge_response(grey, radius=5, multiply_by_brightness=True)
     assert response[60, 60] == pytest.approx(0.2, abs=1e-6)
 
 
@@ -126,15 +128,28 @@ def test_line_art_returns_two_tone_by_default():
     assert set(values.tolist()) <= {0, 255}, "output must be pure black and white"
 
 
-def test_line_art_keeps_a_dark_collar_solid():
-    """A regression for the reported defect: a big black area must stay black."""
+def test_line_art_draws_a_dark_area_as_an_outline_not_a_block():
+    """The user's requirement, in one assertion.
+
+    "对于线稿的头发，要么直接全部涂成色块，要么全部彻底重绘成线稿，不要一部分
+    涂色一部分线稿." Line art is the second choice: a large dark shape comes
+    out as its boundary, and its interior is paper. The old behaviour inked the
+    interior solid, which on a shaded drawing turned whole regions black and
+    left the highlights behind as white holes.
+
+    ``multiply_by_brightness=True`` still gives the solid reading for anyone who
+    wants a poster rather than a drawing.
+    """
     image = np.full((400, 400, 3), 255, np.uint8)
     # A dark block far larger than any plausible filter radius.
     image[120:300, 120:300] = 40
-    result = line_art(image)
 
-    centre = result[210, 210]
-    assert centre == 0, "the interior of a large dark shape must be inked"
+    result = line_art(image)
+    assert result[210, 210] == 255, "暗块内部应当是纸，只有轮廓是墨"
+    assert (result[119:123, 130:290] == 0).any(), "暗块的边界必须有线"
+
+    solid = line_art(image, params=LineArtParams(multiply_by_brightness=True))
+    assert solid[210, 210] == 0, "打开开关后应当恢复成实心色块"
 
 
 def test_line_art_of_a_blank_image_is_blank():
@@ -159,7 +174,10 @@ def test_alpha_is_composited_onto_white():
 
     result = line_art(image)
     assert (result[0:20, 0:20] == 255).all(), "transparent背景 must be paper"
-    assert (result[60:90, 60:90] < 128).any(), "the solid subject must be inked"
+    # The subject is uniform, so a line drawing gives its *outline*; the
+    # interior is paper. Checking the centre would be asserting the poster
+    # behaviour that line art deliberately no longer has.
+    assert (result[49:53, 60:90] < 128).any(), "主体的外轮廓必须有线"
 
 
 def test_line_art_accepts_greyscale_input():
@@ -696,3 +714,59 @@ def test_thin_glyphs_survive_smoothing():
     assert before == 2
     assert after == 2, f"细笔画被平滑核切碎了（{before} -> {after}）"
     assert smoothed[100, 275] == 1, "细条的中段被抹掉了"
+
+
+# ------------------------------------------------- lines, never half-and-half
+
+
+def test_a_shaded_picture_comes_out_as_lines_not_blocks():
+    """The user's requirement, on the shape of picture that showed the defect.
+
+    "对于线稿的头发，要么直接全部涂成色块，要么全部彻底重绘成线稿，不要一部分
+    涂色一部分线稿." The old response -- ``dodge * G`` -- did exactly the
+    forbidden mixture: on a dark gradient the ratio is near 1 (no edge) but the
+    product drops below the threshold, so whole regions printed solid *and* the
+    highlights inside them survived as holes.
+
+    Measured on a shading ramp: the ratio response inks far fewer pixels than
+    the product did, and what it inks is the gradient's contour rather than its
+    body.
+    """
+    # A smooth vertical ramp: no edges at all, only a gradient.
+    ramp = np.tile(np.linspace(20, 235, 400, dtype=np.uint8), (300, 1))
+    image = cv2.cvtColor(ramp, cv2.COLOR_GRAY2BGR)
+
+    as_lines = line_art(image)
+    as_blocks = line_art(image, params=LineArtParams(multiply_by_brightness=True))
+
+    lines_ink = float((as_lines == 0).mean())
+    blocks_ink = float((as_blocks == 0).mean())
+
+    # Measured on this ramp: 47% ink for the poster reading, 8% for the lines.
+    # Asserted as the *relationship* rather than two magic numbers, because
+    # what matters is that the two readings are far apart and the line reading
+    # is the sparse one.
+    assert blocks_ink > 5 * lines_ink, (
+        f"两种读法应当差别巨大：线稿 {100 * lines_ink:.1f}% vs 板画 {100 * blocks_ink:.1f}%"
+    )
+    assert lines_ink < 0.15, (
+        f"线稿不该把渐变涂成实心块，实际墨量 {100 * lines_ink:.1f}%"
+    )
+
+
+def test_the_interior_of_a_shaded_region_is_not_paper_in_the_poster_reading():
+    """The two readings must stay reachable, not one replacing the other.
+
+    Line art is the default; the poster reading is what 板画 is built on, so
+    both have to keep working. This pins the pair together so a future change
+    to one is noticed in the other.
+    """
+    image = np.full((300, 300, 3), 255, np.uint8)
+    image[60:240, 60:240] = 70
+
+    lines = line_art(image)
+    poster = line_art(image, params=LineArtParams(multiply_by_brightness=True))
+
+    assert lines[150, 150] == 255 and poster[150, 150] == 0, (
+        "线稿应当是轮廓、板画应当是实心；两者必须都还能做到"
+    )
