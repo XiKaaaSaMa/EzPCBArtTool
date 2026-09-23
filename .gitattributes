@@ -1,0 +1,18 @@
+# Line endings are pinned so a clone behaves the same on every machine.
+# With only the system-wide `core.autocrlf=true` in play, a Linux or macOS
+# clone would get LF batch files, and a Windows clone would get CRLF sources
+# that differ from every other checkout.
+* text=auto eol=lf
+
+# cmd.exe is unreliable with bare LF inside `if`/`for` blocks, and run.bat is
+# the documented way to launch the tool.
+*.bat text eol=crlf
+
+# The captured fixture is evidence, not source: keep its bytes exactly as
+# extracted from the editor so the calibration figures stay reproducible.
+*.epru -text
+
+# Binary assets
+*.ico binary
+*.png binary
+*.jpg binary

@@ -1,0 +1,10 @@
+# Geometry and image processing.
+shapely>=2.0
+numpy>=2.0
+opencv-python-headless>=4.10
+
+# Tests.
+pytest>=8.0
+
+# GUI (M1). The core library stays Qt-free; only the desktop app imports this.
+PySide6>=6.6
