@@ -141,6 +141,7 @@ from PySide6.QtCore import (
     QRectF,
     QSize,
     Qt,
+    QThread,
     QTimer,
     Signal,
 )
@@ -5862,6 +5863,9 @@ class ThemeSettingsPanel(FloatingPanel):
         # ------------------------------------------------- external model
         layout.addWidget(self._build_model_group())
 
+        # ---------------------------------------------------------- updates
+        layout.addWidget(self._build_update_group())
+
         layout.addStretch(1)
 
         self._sync()
@@ -5926,6 +5930,64 @@ class ThemeSettingsPanel(FloatingPanel):
         muted(self.model_hint)
         layout.addWidget(self.model_hint)
         return group
+
+    def _build_update_group(self) -> QWidget:
+        """Section 5: whether to check for updates, and a manual check button.
+
+        The manual button is deliberately **not** tied to the checkbox. Turning
+        automatic checks off must not take away the only way to ask for an
+        update -- a feature reachable only through automation is this project's
+        recurring "only the script calls it" defect.
+        """
+        from pcbart import __version__ as current_version
+
+        group = section("5 · 更新", compact=True)
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        self.update_check_box = QCheckBox("启动时检查更新")
+        self.update_check_box.setChecked(self._auto_check_enabled())
+        self.update_check_box.toggled.connect(self._set_auto_check)
+        layout.addWidget(self.update_check_box)
+
+        note = QLabel(
+            "只读取官网上的一个版本清单，不发送任何本机信息。"
+            "关闭后仍可用下面的按钮手动检查。"
+        )
+        note.setWordWrap(True)
+        muted(note)
+        layout.addWidget(note)
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        self.update_version_label = QLabel(f"当前版本：{current_version}")
+        muted(self.update_version_label)
+        row.addWidget(self.update_version_label)
+        row.addStretch(1)
+        self.update_now_button = QPushButton("立即检查更新")
+        self.update_now_button.clicked.connect(self._check_now)
+        row.addWidget(self.update_now_button)
+        layout.addLayout(row)
+        return group
+
+    # -------------------------------------------------------------- updates
+
+    @staticmethod
+    def _auto_check_enabled() -> bool:
+        """Whether startup checks are on. Default on -- it is the point."""
+        from pcbart.ui_theme import load_settings
+
+        value = load_settings().get("update_check")
+        return True if value is None else bool(value)
+
+    def _set_auto_check(self, enabled: bool) -> None:
+        from pcbart.ui_theme import save_settings_keeping
+
+        save_settings_keeping(update_check=bool(enabled))
+
+    def _check_now(self) -> None:
+        start_update_check(self.window(), manual=True)
 
     def focus_model_section(self) -> None:
         """Bring the model controls into view and put the keyboard on them.
@@ -6173,6 +6235,319 @@ def _readable_on(colour: str) -> str:
     from pcbart.ui_theme import _on_colour
 
     return _on_colour(colour)
+
+
+class UpdatePanel(FloatingPanel):
+    """The "a new version is out" panel: version, changelog, download button.
+
+    Layout follows MAA's update dialog -- the version centred at the top and
+    the changelog filling the rest -- because that shape is already familiar
+    from the tools this one sits beside, and it puts the two things a user
+    actually reads (which version, what changed) above everything else.
+
+    Unlike MAA's dialog this one carries the download button itself. That is
+    the whole request: the point is not having to go to the website.
+
+    Notes are rendered as plain text, one label per entry, rather than through
+    a Markdown renderer. They come from a manifest this project publishes so
+    Markdown would be safe today, but the entries are one-line sentences by
+    convention and rich text buys nothing.
+    """
+
+    #: Wide enough for a changelog line without wrapping, and tall enough that
+    #: a ten-entry release does not need scrolling on a 1080p screen.
+    WIDTH = 520
+    HEIGHT = 470
+
+    def __init__(self, parent: QWidget, release, *, on_download=None) -> None:
+        super().__init__(parent, "发现新版本", width=self.WIDTH)
+        self._release = release
+        self._on_download = on_download
+        self._downloading = False
+
+        layout = self.content_layout
+
+        # ------------------------------------------------- version headline
+        # Centred and larger than everything else, the way MAA shows its tag.
+        version = QLabel(f"v{release.version}")
+        version.setAlignment(Qt.AlignCenter)
+        version.setStyleSheet("font-size: 20px; font-weight: 600;")
+        layout.addWidget(version)
+
+        if release.date:
+            date_label = QLabel(release.date)
+            date_label.setAlignment(Qt.AlignCenter)
+            muted(date_label)
+            layout.addWidget(date_label)
+
+        # ------------------------------------------------------ changelog
+        notes_group = section("更新内容", compact=True)
+        notes_layout = QVBoxLayout(notes_group)
+        notes_layout.setContentsMargins(4, 0, 4, 0)
+        notes_layout.setSpacing(4)
+        for note in release.notes or ("（本次更新没有写说明）",):
+            entry = QLabel(f"· {note}")
+            entry.setWordWrap(True)
+            entry.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            notes_layout.addWidget(entry)
+        notes_layout.addStretch(1)
+
+        scroller = QScrollArea()
+        scroller.setWidget(notes_group)
+        scroller.setWidgetResizable(True)
+        scroller.setFrameShape(QFrame.NoFrame)
+        scroller.setMinimumHeight(250)
+        layout.addWidget(scroller, 1)
+
+        # ------------------------------------------------------- size hint
+        if release.size:
+            size_label = QLabel(f"安装包 {release.size / 1024 / 1024:.1f} MB")
+            muted(size_label)
+            layout.addWidget(size_label)
+
+        # ------------------------------------------------------ action row
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
+        muted(self.status_label)
+        layout.addWidget(self.status_label)
+
+        buttons = QHBoxLayout()
+        buttons.setContentsMargins(0, 0, 0, 0)
+        buttons.addStretch(1)
+        self.later_button = QPushButton("稍后")
+        self.later_button.clicked.connect(self.close_panel)
+        buttons.addWidget(self.later_button)
+
+        self.download_button = QPushButton("下载并安装")
+        self.download_button.setDefault(True)
+        self.download_button.clicked.connect(self._start_download)
+        buttons.addWidget(self.download_button)
+        layout.addLayout(buttons)
+
+        self.resize(self.WIDTH, self.HEIGHT)
+
+    def _start_download(self) -> None:
+        """Hand off to the downloader, which runs off the UI thread.
+
+        The button is disabled here rather than on the first progress callback:
+        a second click before the worker starts would begin a second download
+        into the same file.
+        """
+        if self._downloading:
+            return
+        self._downloading = True
+        self.download_button.setEnabled(False)
+        self.status_label.setText("正在下载…")
+        if self._on_download is not None:
+            self._on_download(self)
+
+    def set_progress(self, done: int, total: int) -> None:
+        """Report how much has arrived. Plain counts, not a percentage bar."""
+        if total > 0:
+            self.status_label.setText(
+                f"正在下载… {done / 1024 / 1024:.1f} / {total / 1024 / 1024:.1f} MB"
+            )
+        else:
+            self.status_label.setText(f"正在下载… {done / 1024 / 1024:.1f} MB")
+
+    def finish(self, message: str, *, failed: bool = False) -> None:
+        """Show the end state, and let the user try again if it failed."""
+        self.status_label.setText(message)
+        if failed:
+            self._downloading = False
+            self.download_button.setEnabled(True)
+            self.download_button.setText("重试")
+
+
+#: The open update panel, if any. Module-level because the panel is opened by
+#: a background check that has no other handle on the widget.
+_update_panel: "UpdatePanel | None" = None
+
+
+class _UpdateCheckWorker(QThread):
+    """Runs the manifest fetch off the UI thread.
+
+    The check is short (3 s timeout) but it is network I/O during startup: on
+    a slow or filtered connection, doing it inline would freeze the window
+    before it ever painted.
+    """
+
+    finished_check = Signal(object)
+
+    def __init__(self, parent, local_version: str) -> None:
+        super().__init__(parent)
+        self._local_version = local_version
+
+    def run(self) -> None:  # noqa: D102 - QThread entry point
+        from pcbart.update_check import check_for_update
+
+        try:
+            status = check_for_update(self._local_version)
+        except Exception:  # pragma: no cover - the checker never raises by design
+            status = None
+        self.finished_check.emit(status)
+
+
+class _UpdateDownloadWorker(QThread):
+    """Downloads and verifies the installer, reporting progress by signal."""
+
+    progress = Signal(int, int)
+    finished_download = Signal(bool, str, str)  # ok, message, path
+
+    def __init__(self, parent, release, target) -> None:
+        super().__init__(parent)
+        self._release = release
+        self._target = target
+
+    def run(self) -> None:  # noqa: D102 - QThread entry point
+        from pcbart.update_check import download, quarantine_partial, verify_download
+
+        ok = download(
+            self._release,
+            self._target,
+            timeout=60.0,
+            on_progress=lambda done, total: self.progress.emit(done, total),
+        )
+        if not ok:
+            self.finished_download.emit(False, "下载失败，请检查网络后重试。", "")
+            return
+        if not verify_download(self._target, self._release.sha256):
+            # Move the bad file aside rather than deleting it, and rather than
+            # leaving it in place for the next attempt to resume onto.
+            quarantine_partial(self._target)
+            self.finished_download.emit(False, "下载的文件校验不通过，已丢弃。", "")
+            return
+        self.finished_download.emit(True, "下载完成，正在启动安装程序…", str(self._target))
+
+
+def _updates_dir():
+    """Where installers are staged. Under the cache root, never beside the exe."""
+    from pcbart.paths import cache_dir
+
+    return cache_dir("updates")
+
+
+def _auto_check_enabled_setting() -> bool:
+    """Whether startup update checks are on, read without a panel around.
+
+    Defaults to on: automatic checking is the feature. A missing or malformed
+    preference reads as the default rather than as "off", so a hand-edited
+    settings file cannot silently disable it.
+    """
+    from pcbart.ui_theme import load_settings
+
+    value = load_settings().get("update_check")
+    return True if value is None else bool(value)
+
+
+def start_update_check(main_window: QWidget, *, manual: bool = False) -> None:
+    """Check for a newer release and, if there is one, offer it.
+
+    ``manual`` changes only what a *negative* result looks like: an automatic
+    check says nothing when there is no update, while a manual one has to
+    answer the user who just clicked the button.
+    """
+    from pcbart import __version__
+
+    window = main_window
+    worker = _UpdateCheckWorker(window, __version__)
+    # Parented to the window but referenced by the connection, so it is not
+    # collected while running.
+    window._update_check_worker = worker  # type: ignore[attr-defined]
+
+    def on_done(status) -> None:
+        window._update_check_worker = None  # type: ignore[attr-defined]
+        if status is None or not status.available or status.release is None:
+            if manual:
+                reason = getattr(status, "reason", "") or "检查失败"
+                QMessageBox.information(window, "检查更新", f"没有可用更新：{reason}")
+            return
+        show_update(window, status.release, on_download=_begin_update_download)
+
+    worker.finished_check.connect(on_done)
+    worker.start()
+
+
+def _begin_update_download(panel: "UpdatePanel") -> None:
+    """Download and verify, then launch the installer and quit.
+
+    Kept as a module function rather than a panel method so the panel keeps
+    knowing nothing about paths, threads or process launching.
+    """
+    window = panel.window()
+    release = panel._release
+    target = staged_path_for(release)
+
+    worker = _UpdateDownloadWorker(window, release, target)
+    window._update_download_worker = worker  # type: ignore[attr-defined]
+
+    worker.progress.connect(panel.set_progress)
+
+    def on_finished(ok: bool, message: str, path: str) -> None:
+        window._update_download_worker = None  # type: ignore[attr-defined]
+        if not ok:
+            panel.finish(message, failed=True)
+            return
+        panel.finish(message)
+        _launch_installer(window, path, panel)
+
+    worker.finished_download.connect(on_finished)
+    worker.start()
+
+
+def staged_path_for(release):
+    """Where ``release`` will be downloaded to."""
+    from pcbart.update_check import staged_path
+
+    return staged_path(release, _updates_dir())
+
+
+def _launch_installer(window: QWidget, path: str, panel: "UpdatePanel") -> None:
+    """Start the installer, then close the application.
+
+    The order matters and so does the delay: Windows will not let an installer
+    replace a running executable, so the application has to be gone before the
+    setup program starts touching files. The installer is launched first (so a
+    failure to launch can still be reported here), then the close is scheduled
+    a moment later to give the new process time to appear.
+    """
+    import subprocess
+
+    try:
+        subprocess.Popen([path], close_fds=True)
+    except OSError as exc:
+        panel.finish(f"无法启动安装程序：{exc}", failed=True)
+        return
+
+    panel.finish("安装程序已启动，本程序即将退出。")
+    QTimer.singleShot(1200, lambda: window.close())
+
+
+def show_update(main_window: QWidget, release, *, on_download=None) -> UpdatePanel:
+    """Open the update panel, replacing any panel already showing.
+
+    The old panel is always replaced rather than reused: it displays one
+    release, and mutating a live panel in place could leave the previous
+    release's header on screen while the notes below it are the new ones.
+
+    Closing the old one has to go through a liveness check. After the owning
+    window is destroyed the module global still holds a Python wrapper whose
+    C++ half is gone, and calling ``close_panel`` on that raises -- the same
+    trap ``reusable_panel`` exists for.
+    """
+    global _update_panel
+    previous = live_panel("_update_panel")
+    if previous is not None:
+        try:
+            if previous.parentWidget() is main_window:
+                previous.close_panel()
+        except RuntimeError:
+            pass  # C++ half already gone; nothing to close.
+    panel = UpdatePanel(main_window, release, on_download=on_download)
+    _update_panel = panel
+    panel.show()
+    panel.place_top_right()
+    return panel
 
 
 def show_settings(main_window: QWidget) -> "ThemeSettingsPanel | None":
@@ -10765,6 +11140,16 @@ def main() -> int:
         if floating is not None and floating.parentWidget() is window:
             floating.place_top_right()
             floating.raise_()
+
+    # Check for a newer release, off the UI thread and only after the window is
+    # up. Delayed rather than immediate so a slow check cannot delay the first
+    # paint, and so the update panel does not fight the startup panels for the
+    # same corner of the screen. Skipped entirely for screenshot runs, which
+    # must be deterministic and must not reach the network.
+    if _auto_check_enabled_setting():
+        QTimer.singleShot(
+            5000, lambda: start_update_check(window, manual=False)
+        )
     return app.exec()
 
 

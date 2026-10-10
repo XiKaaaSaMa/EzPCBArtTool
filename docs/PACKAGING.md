@@ -152,7 +152,51 @@ P:\Zcode开发专用文件夹\安装包保存区\
     正式版\    正式版（x.0.0）
 ```
 
-**按版本号类型放对应子目录**，文件名沿用 `PCB艺术板工具_v<版本>_安装包.exe`。
+**按版本号类型放对应子目录**，文件名沿用 `EzPCBArtTool_v<版本>_安装包.exe`。
+
+---
+
+## 一·三、命名规则（用户 2026-10-10 定）
+
+项目里有**两套名字**，故意分开。改打包配置时不要把两者合并：
+
+| 层面 | 用哪个名 | 出现在哪里 |
+|---|---|---|
+| **文件层** | **`EzPCBArtTool`** | 安装包文件名、程序 exe 名、安装目录、源码仓库名 |
+| **显示层** | **`PCB艺术板工具`** | 窗口标题、关于对话框、开始菜单文件夹与快捷方式文字、控制面板卸载项 |
+
+用户原话：「下一个版本开始安装包用我仓库那个名字，不用现在这个了」，
+并确认**界面仍显示中文名**。
+
+具体落点：
+
+| 位置 | 字段 | 值 |
+|---|---|---|
+| `PCB艺术板工具.spec` | `EXE(name=...)` | `EzPCBArtTool` |
+| `PCB艺术板工具.spec` | `COLLECT(name=...)` | `EzPCBArtTool` |
+| `installer.iss` | `AppDirName` | `EzPCBArtTool`（安装目录） |
+| `installer.iss` | `AppExeName` | `EzPCBArtTool.exe` |
+| `installer.iss` | `OutputBaseFilename` | `EzPCBArtTool_v{#AppVersion}_安装包` |
+| `installer.iss` | `AppName` / `DefaultGroupName` / `UninstallDisplayName` | `PCB艺术板工具`（显示层，**不改**） |
+| `tools/gui_mockup.py` | `setWindowTitle` | `PCB 艺术板工具`（**不改**） |
+| `pcbart/paths.py` | `APP_DIR_NAME` | `PCB艺术板工具`（**不改**，见下） |
+
+### ⚠️ 用户数据目录**不要跟着改名**
+
+`pcbart/paths.py` 的 `APP_DIR_NAME = "PCB艺术板工具"` 决定
+`%LOCALAPPDATA%\PCB艺术板工具\`，用户的**草稿、缓存、外接模型都在里面**。
+跟着改名会让老用户的草稿全部凭空消失（程序会当作新装环境，建一个空库）。
+
+**所以程序文件名改了、安装目录改了，但数据目录保持不动。**
+`installer.iss` 的 `[UninstallDelete]` 也继续指向旧路径，卸载行为不变。
+
+### ⚠️ 已装 1.0.0 的用户需要手动卸载
+
+程序名与安装目录都变了，1.1.0 **不会覆盖** 1.0.0，而是装到
+`EzPCBArtTool` 目录。旧版留在 `PCB艺术板工具` 目录里，需要用户自己去
+控制面板卸载一次。
+
+发布时要在 Release 说明里写明这一条 —— 这不是缺陷，是改名的一次性代价。
 
 ---
 
