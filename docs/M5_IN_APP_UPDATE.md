@@ -189,6 +189,28 @@ MAA 把下载按钮放在别处（设置页的「软件更新」），弹窗只�
 不做百分比进度条（同网站下载按钮的理由：**CNB 的 CDN 会拒绝带 `Origin` 的请求**，
 `fetch` 拿不到流）。用不定量反馈 + 已下载字节数的文本更新。
 
+### 4. ⚠️ 按钮必须放在面板的固定页脚里
+
+第一版把「状态文字 + 两个按钮」和更新日志放在同一个 `content_layout` 里，
+**结果是一个真 bug**：`FloatingPanel` 本身已经有滚动区，我又在里面嵌了第二个
+`QScrollArea`；长更新日志一到，内容高度涨到 517 px 而面板只有 470 px，
+**两个按钮和下载进度一起掉到面板外面**——恰好是用户点了下载、最需要看到
+进度的时候。
+
+修法：删掉嵌套滚动区，按钮与状态改挂 `FloatingPanel.set_footer()`。
+`set_footer` 的 docstring 里写着它就是为这种情况准备的
+（「In the scrolling area it sat ~380 px below the fold on this panel, so the
+button that actually applies the settings was the one thing the user could
+not see」）—— 同一个坑，这个项目里踩过第二次。
+
+**测试**：`test_buttons_stay_visible_with_a_long_changelog` 与
+`test_status_line_is_visible_while_downloading` 用 40 条说明把内容撑高，
+断言「没有第二层滚动区」「按钮不在滚动区里」「按钮与状态文字的底边都在面板高度以内」。
+**注入验证**：把按钮挪回 `content_layout` → 两条测试变红。
+
+⚠️ **这类问题只有渲染截图才能发现**：几何断言当时全绿（Qt 的布局会报
+一个「合理的」几何值），是肉眼看截图才看出按钮不见了。
+
 ---
 
 ## 五、⚠️ 默认行为必须保守

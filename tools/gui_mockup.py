@@ -6281,6 +6281,13 @@ class UpdatePanel(FloatingPanel):
             layout.addWidget(date_label)
 
         # ------------------------------------------------------ changelog
+        #
+        # ⚠️ **No nested QScrollArea here.** ``FloatingPanel`` already puts the
+        # content in one, and a second one inside it was a real defect: the
+        # inner scroller reported its own minimum height, the content widget
+        # grew past the panel, and the action buttons ended up below the
+        # visible area -- exactly when the user needed them (the download had
+        # just started). Long changelogs use the panel's own scrolling.
         notes_group = section("更新内容", compact=True)
         notes_layout = QVBoxLayout(notes_group)
         notes_layout.setContentsMargins(4, 0, 4, 0)
@@ -6291,13 +6298,7 @@ class UpdatePanel(FloatingPanel):
             entry.setTextInteractionFlags(Qt.TextSelectableByMouse)
             notes_layout.addWidget(entry)
         notes_layout.addStretch(1)
-
-        scroller = QScrollArea()
-        scroller.setWidget(notes_group)
-        scroller.setWidgetResizable(True)
-        scroller.setFrameShape(QFrame.NoFrame)
-        scroller.setMinimumHeight(250)
-        layout.addWidget(scroller, 1)
+        layout.addWidget(notes_group, 1)
 
         # ------------------------------------------------------- size hint
         if release.size:
@@ -6305,11 +6306,21 @@ class UpdatePanel(FloatingPanel):
             muted(size_label)
             layout.addWidget(size_label)
 
-        # ------------------------------------------------------ action row
+        # --------------------------------------------------- footer (buttons)
+        #
+        # The status line and the buttons live in the panel's pinned footer,
+        # not in the scrolling area. They are the only interactive part of this
+        # panel, and a long changelog must not be able to push them out of
+        # sight -- ``set_footer`` exists for precisely this case.
+        footer = QWidget()
+        footer_layout = QVBoxLayout(footer)
+        footer_layout.setContentsMargins(0, 0, 0, 0)
+        footer_layout.setSpacing(6)
+
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
         muted(self.status_label)
-        layout.addWidget(self.status_label)
+        footer_layout.addWidget(self.status_label)
 
         buttons = QHBoxLayout()
         buttons.setContentsMargins(0, 0, 0, 0)
@@ -6322,8 +6333,9 @@ class UpdatePanel(FloatingPanel):
         self.download_button.setDefault(True)
         self.download_button.clicked.connect(self._start_download)
         buttons.addWidget(self.download_button)
-        layout.addLayout(buttons)
+        footer_layout.addLayout(buttons)
 
+        self.set_footer(footer)
         self.resize(self.WIDTH, self.HEIGHT)
 
     def _start_download(self) -> None:

@@ -122,6 +122,69 @@ def test_reopening_replaces_the_previous_panel(window):
     assert gui_mockup.live_panel("_update_panel") is second
 
 
+def test_buttons_stay_visible_with_a_long_changelog(window):
+    """A long changelog must not push the action buttons out of the panel.
+
+    This was a real defect: the panel nested its own ``QScrollArea`` inside the
+    one ``FloatingPanel`` provides, so the content grew past the panel and both
+    buttons ended up below the visible area -- precisely when the user had just
+    started a download and needed the status line.
+
+    **Injection check**: put the nested scroller back (or move the buttons into
+    ``content_layout``) and the geometry assertion goes red.
+    """
+    from PySide6.QtWidgets import QScrollArea
+
+    long_release = _release(
+        notes=tuple(f"修复：第 {index} 条足够长的更新说明，用来把内容撑高" for index in range(40))
+    )
+    panel = show_update(window, long_release)
+    window.show()
+    for _ in range(3):
+        QApplication.processEvents()
+
+    # The footer is pinned: it must not be inside the scrolling area.
+    assert panel.findChildren(QScrollArea), "面板本身应当有滚动区"
+    inner = [
+        area
+        for area in panel.findChildren(QScrollArea)
+        if area is not panel._scroll
+    ]
+    assert inner == [], "不应再有第二层滚动区（嵌套滚动会把按钮挤出面板）"
+
+    footer = panel.download_button.parentWidget()
+    assert panel._footer.isAncestorOf(panel.download_button), (
+        "按钮必须挂在固定页脚里，而不是滚动内容中"
+    )
+    assert not panel._scroll.isAncestorOf(panel.download_button), (
+        "按钮不能在滚动区里，否则长日志会把它推走"
+    )
+
+    for button in (panel.download_button, panel.later_button):
+        bottom = button.mapTo(panel, button.rect().bottomLeft()).y()
+        assert bottom < panel.height(), (
+            f"{button.text()} 被挤出面板（bottom={bottom}, panel={panel.height()}）"
+        )
+
+
+def test_status_line_is_visible_while_downloading(window):
+    """The progress text must be on screen, not scrolled away."""
+    long_release = _release(
+        notes=tuple(f"新增：第 {index} 条说明" for index in range(40))
+    )
+    panel = show_update(window, long_release)
+    window.show()
+    panel.set_progress(12_345_678, 50_144_467)
+    for _ in range(3):
+        QApplication.processEvents()
+
+    assert panel.status_label.isVisible() is True
+    bottom = panel.status_label.mapTo(
+        panel, panel.status_label.rect().bottomLeft()
+    ).y()
+    assert bottom < panel.height(), "下载进度文字被挤出面板"
+
+
 def test_progress_and_failure_are_reported(window):
     panel = show_update(window, _release())
     panel.set_progress(1024 * 1024, 4 * 1024 * 1024)
