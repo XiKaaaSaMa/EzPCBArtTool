@@ -169,7 +169,7 @@ def test_loading_a_shaded_picture_ticks_denoise(app, tmp_path):
         panel.load_image(_soft_shaded(tmp_path / "s.png"))
         app.processEvents()
 
-        assert panel.denoise_check.isChecked() is True
+        assert panel.denoise_check.isChecked() is False, "默认不该打开降噪"
         chosen = panel.denoise_slider.value()
         expected = round(1400 * gui_mockup.SOFT_SHADING_KERNEL_SHARE)
         assert chosen == expected, f"应当按短边比例选核，得到 {chosen}，期望 {expected}"
@@ -197,8 +197,13 @@ def test_loading_a_flat_drawing_leaves_denoise_alone(app, tmp_path):
         window.hide()
 
 
-def test_the_denoise_choice_stays_the_users_to_make(app, tmp_path):
-    """A hint the user cannot override is worse than the artefact it fixes."""
+def test_the_user_can_switch_denoise_on(app, tmp_path):
+    """The hint offers the control; it does not take it over.
+
+    ⚠️ The default is off, at the user's request: an import that silently
+    changes a processing switch makes the result hard to predict, and the blur
+    is visible in the line art.
+    """
     window = build_window()
     try:
         window.setAttribute(Qt.WA_DontShowOnScreen, True)
@@ -209,17 +214,22 @@ def test_the_denoise_choice_stays_the_users_to_make(app, tmp_path):
 
         panel.load_image(_soft_shaded(tmp_path / "s.png"))
         app.processEvents()
-        assert panel.denoise_check.isChecked() is True
+        assert panel.denoise_check.isChecked() is False
 
-        panel.denoise_check.setChecked(False)
+        panel.denoise_check.setChecked(True)
         app.processEvents()
-        assert panel.denoise_check.isChecked() is False, "用户应当能取消自动降噪"
+        assert panel.denoise_check.isChecked() is True, "用户应当能打开降噪"
     finally:
         window.hide()
 
 
-def test_the_panel_says_why_it_changed_a_setting(app, tmp_path):
-    """A control that moves on its own needs to explain itself."""
+def test_the_panel_offers_denoise_without_applying_it(app, tmp_path):
+    """The panel names the switch and the prepared kernel, and leaves it off.
+
+    A softly shaded picture traces better after a blur, so the note has to say
+    so -- but the user asked for the default to be off, so the note must not
+    claim the setting was applied.
+    """
     window = build_window()
     try:
         window.setAttribute(Qt.WA_DontShowOnScreen, True)
@@ -231,7 +241,11 @@ def test_the_panel_says_why_it_changed_a_setting(app, tmp_path):
         panel.load_image(_soft_shaded(tmp_path / "s.png"))
         app.processEvents()
 
-        assert "降噪" in panel.process_note.text(), panel.process_note.text()
+        note = panel.process_note.text()
+        assert "降噪" in note, note
+        assert "默认不勾选" in note, note
+        assert "已勾选" not in note, note
+        assert panel.denoise_check.isChecked() is False
     finally:
         window.hide()
 

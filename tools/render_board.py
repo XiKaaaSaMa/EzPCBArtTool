@@ -26,56 +26,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import cv2  # noqa: E402
 
 from pcbart.epru import EproArchive, EproDocument  # noqa: E402
-from pcbart.primitives import Mode  # noqa: E402
 
 UNIT_MM = 0.0254
 
 
 def decode_path(node) -> list[list[tuple[float, float]]]:
-    """Decode a path into rings of raw-file-coordinate points."""
-    if not isinstance(node, list) or not node:
-        return []
-    if isinstance(node[0], list):
-        rings = []
-        for item in node:
-            rings.extend(decode_path(item))
-        return rings
-    if node[0] == Mode.CIRCLE and len(node) >= 4:
-        cx, cy, r = float(node[1]), float(node[2]), float(node[3])
-        return [
-            [
-                (
-                    cx + r * math.cos(2 * math.pi * i / 48),
-                    cy + r * math.sin(2 * math.pi * i / 48),
-                )
-                for i in range(48)
-            ]
-        ]
-    if node[0] == Mode.R and len(node) >= 5:
-        x, y, w, h = (float(v) for v in node[1:5])
-        return [[(x, y), (x + w, y), (x + w, y + h), (x, y + h)]]
+    """Decode a path into rings of raw-file-coordinate points.
 
-    points: list[tuple[float, float]] = []
-    pending: list[float] = []
-    i = 0
-    while i < len(node):
-        item = node[i]
-        if isinstance(item, str):
-            points.extend(
-                (pending[j], pending[j + 1]) for j in range(0, len(pending) - 1, 2)
-            )
-            pending = []
-            i += 1
-            if item in (Mode.ARC, Mode.CARC):
-                if i + 2 < len(node):
-                    points.append((float(node[i + 1]), float(node[i + 2])))
-                i += 3
-            continue
-        if isinstance(item, (int, float)):
-            pending.append(float(item))
-        i += 1
-    points.extend((pending[j], pending[j + 1]) for j in range(0, len(pending) - 1, 2))
-    return [points] if points else []
+    Delegates to :func:`pcbart.geometry.densify_path`, which is the single
+    decoder for ``L`` / ``ARC`` / ``C`` / ``R`` / ``CIRCLE``.  A second decoder
+    here had already drifted twice -- rectangle height direction and cubic
+    Bezier controls -- and both mistakes showed up as misplaced template art.
+    """
+    from pcbart.geometry import densify_path
+
+    return densify_path(node)
 
 
 def shape_ring(shape, cx: float, cy: float, segments: int = 64):

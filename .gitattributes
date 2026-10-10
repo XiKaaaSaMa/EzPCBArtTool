@@ -12,7 +12,28 @@
 # extracted from the editor so the calibration figures stay reproducible.
 *.epru -text
 
-# Binary assets
+# Binary assets.
+#
+# ⚠️ **Every binary type must be listed here.** The catch-all above is
+# ``text=auto eol=lf``, so an unlisted binary is one heuristic away from being
+# line-ending-normalised on checkout. Git currently detects ``face.onnx`` as
+# binary because it happens to contain NUL bytes early, but that is luck, not a
+# guarantee -- and a corrupted model fails at run time rather than at clone
+# time, which is the worst place to find out.
 *.ico binary
 *.png binary
 *.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.bmp binary
+*.onnx binary
+*.bin binary
+*.pth binary
+*.pt binary
+*.zip binary
+*.7z binary
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary

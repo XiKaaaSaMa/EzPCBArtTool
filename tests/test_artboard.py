@@ -539,9 +539,29 @@ def test_placement_for_pixels_survives_a_degenerate_size():
 # ------------------------------------------------------------------ templates
 
 
-def test_no_templates_are_registered_by_default():
-    """The feature is pending user-supplied files; the interface is ready."""
-    assert template_names() == []
+def test_the_badge_card_ships_as_a_template():
+    """The 通行证 card is a real template now, not a pending feature.
+
+    Its outline is a rectangle with cut corners *and* a notch, which no preset
+    can express -- that is why ``OutlineShape.TEMPLATE`` exists.
+    """
+    from pcbart.badge_card import BADGE_HEIGHT_MM, BADGE_WIDTH_MM, TEMPLATE_NAME
+
+    assert TEMPLATE_NAME in template_names()
+    spec = build_template(TEMPLATE_NAME)
+    assert spec.shape == OutlineShape.TEMPLATE
+    assert len(spec.template_outline) >= 8
+    board = ArtBoard(outline=spec, outline_ready=True)
+    width, height = board.size_mm()
+    assert width == pytest.approx(BADGE_WIDTH_MM, abs=0.01)
+    assert height == pytest.approx(BADGE_HEIGHT_MM, abs=0.01)
+
+
+def test_a_registered_template_can_be_replaced():
+    """Reloading a template file must not need a restart."""
+    register_template("swap-me", BoardOutlineSpec(width_mm=10, height_mm=10))
+    register_template("swap-me", BoardOutlineSpec(width_mm=20, height_mm=20))
+    assert build_template("swap-me").width_mm == 20
 
 
 def test_registering_a_template_makes_it_available():

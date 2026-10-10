@@ -64,8 +64,11 @@ def loaded(app, colour_art):
     assert widget.load_image(str(colour_art)) is True
     app.processEvents()
     yield widget
-    widget.hide()
-    window.hide()
+    from conftest import release_window
+
+    # The *window* is what has to be freed: the panel is its child, and freeing
+    # the panel alone leaves the window and its whole widget tree alive.
+    release_window(window)
 
 
 @pytest.fixture
@@ -403,3 +406,270 @@ def test_the_source_note_switches_to_the_board_size_once_set(loaded):
     text = loaded.source_note.text()
     assert "板框 50.0 × 30.0 mm" in text
     assert "尚未设置板框" not in text
+
+
+# ------------------------------------------- tuning must stay interactive
+
+
+def test_the_trace_cache_survives_uploading_a_picture(loaded):
+    """⚠️ The cache has to exist *after* a load, and this pins that.
+
+    ``load_image`` used to reset it to ``None`` -- with a comment saying the
+    cached conversion belonged to the previous picture, which was true but not
+    the point. Nothing recreated it, so the cache was off for the rest of the
+    session and every slider tick recomputed the subject mask: measured 900 ms
+    per tick on a 1024 px picture instead of 100 ms, which is precisely the
+    "拖动滑块非常卡" the cache was added to fix. A dropped cache is invisible in
+    the output, so only an assertion like this catches it.
+    """
+    assert loaded._trace_cache is not None, "载入图片后缓存必须存在"
+
+
+def test_a_slider_tick_reuses_the_picture_derived_work(loaded):
+    """The second tick must not build the subject mask again.
+
+    Counted rather than timed: a timing assertion would be flaky on a busy
+    machine, while the call count is the thing that actually decides whether the
+    drag is interactive. The mask and the grey conversion are functions of the
+    picture alone, so exactly one computation is right however many ticks run.
+    """
+    import pcbart.lineart as lineart
+
+    calls = {"count": 0}
+    original = lineart.subject_masks
+
+    def counted(*args, **kwargs):
+        calls["count"] += 1
+        return original(*args, **kwargs)
+
+    lineart.subject_masks = counted
+    try:
+        # ``load_image`` already ran one conversion, so the mask is in hand
+        # before the first tick here. That is the intended behaviour: the
+        # picture is processed once on upload and the sliders reuse it.
+        before = calls["count"]
+        for value in (60, 80, 100, 120, 140):
+            loaded.strength_slider.setValue(value)
+            loaded._refresh_preview()
+        assert calls["count"] == before, (
+            f"调参不该重算主体掩膜：{before} -> {calls['count']}"
+        )
+    finally:
+        lineart.subject_masks = original
+
+
+def test_a_new_picture_invalidates_the_trace_cache(loaded, tmp_path):
+    """The cache must not answer for the previous file.
+
+    Keyed on the picture's own bytes, so a different picture cannot hit; this
+    pins that the panel does not instead reuse a stale *cache object*'s answer
+    across an upload.
+    """
+    other = tmp_path / "other.png"
+    image = np.zeros((260, 340, 4), dtype=np.uint8)
+    cv2.rectangle(image, (40, 40), (300, 220), (30, 200, 30, 255), -1)
+    imwrite_unicode(str(other), image)
+
+    assert loaded.load_image(str(other)) is True
+    loaded._refresh_preview()
+
+    from pcbart.lineart import line_art, LineArtParams
+
+    expected = line_art(loaded._source_bgr, loaded._source_alpha, LineArtParams())
+    assert loaded._inline_processed.shape[:2] == expected.shape[:2]
+
+
+def test_switching_readings_swaps_which_controls_are_live(loaded):
+    """The controls a reading ignores are hidden, not left looking usable.
+
+    ⚠️ This panel has been reported twice for controls that were visible,
+    draggable and did nothing. 线条粗细 and 墨量阈值 are read by 纯线条
+    (``mode="dodge"``) and by nothing else: 填充色块 takes its split from Otsu
+    and 描边+填充 from the contour density, so in those two the sliders would
+    move without changing a pixel. Hiding them is not cosmetics -- a slider the
+    user can move but which has no effect is worse than an absent one.
+    """
+    from gui_mockup import (
+        READING_DODGE,
+        READING_FILL,
+        READING_OPTIONS,
+        READING_OUTLINE,
+    )
+
+    order = [key for key, _label, _hint in READING_OPTIONS]
+
+    loaded.reading_combo.setCurrentIndex(order.index(READING_FILL))
+    assert loaded.strength_row.isHidden()
+    assert loaded.threshold_row.isHidden()
+    assert loaded.outline_width_row.isHidden()
+    assert loaded.outline_density_row.isHidden()
+
+    loaded.reading_combo.setCurrentIndex(order.index(READING_OUTLINE))
+    assert loaded.strength_row.isHidden()
+    assert loaded.threshold_row.isHidden()
+    assert not loaded.outline_width_row.isHidden()
+    assert not loaded.outline_density_row.isHidden()
+
+    loaded.reading_combo.setCurrentIndex(order.index(READING_DODGE))
+    assert not loaded.strength_row.isHidden()
+    assert not loaded.threshold_row.isHidden()
+    assert loaded.outline_width_row.isHidden()
+    assert loaded.outline_detail_row.isHidden()
+    assert loaded.outline_density_row.isHidden()
+
+
+def test_the_dodge_reading_stays_last_so_the_default_cannot_move(loaded):
+    """⚠️ ``_reset_tuning`` returns to index 0, so ordering is a promise.
+
+    Inserting a new reading above 填充色块 would silently change what every
+    fresh import does, and the reset button would land on something else. The
+    keys are checked rather than the labels so a reworded label cannot hide a
+    reordered option.
+    """
+    from gui_mockup import READING_DODGE, READING_FILL, READING_OPTIONS
+
+    order = [key for key, _label, _hint in READING_OPTIONS]
+
+    assert order[0] == READING_FILL
+    assert order[-1] == READING_DODGE
+    assert len(order) == len(set(order)), "duplicate reading keys"
+    assert loaded.reading_combo.currentIndex() == 0
+
+
+def test_the_ink_threshold_reaches_the_model_in_the_dodge_reading(loaded):
+    """The slider has to arrive at ``LineArtParams`` unchanged.
+
+    0.46 is the calibrated value -- the model's own default as well as the
+    point the earlier measurements were taken at -- so the panel must not
+    rescale it on the way through.
+    """
+    from gui_mockup import READING_DODGE, READING_OPTIONS
+
+    order = [key for key, _label, _hint in READING_OPTIONS]
+    loaded.reading_combo.setCurrentIndex(order.index(READING_DODGE))
+
+    loaded.threshold_slider.setValue(20)
+    low = loaded._lineart_params()
+    loaded.threshold_slider.setValue(85)
+    high = loaded._lineart_params()
+    loaded.strength_slider.setValue(250)
+    weight = loaded._lineart_params()
+
+    assert low.mode == READING_DODGE
+    assert (low.threshold, high.threshold) == (0.20, 0.85)
+    assert weight.strength == 2.5
+
+
+def test_moving_the_ink_threshold_changes_the_dodge_artwork(loaded):
+    """The controls are live end to end, not just plumbed.
+
+    ⚠️ This is the counter-test to the dead control the panel shipped with: on
+    the ramp below, 纯线条 must return strictly more ink as the threshold
+    rises. The direction is the unintuitive one -- **higher threshold, more
+    ink** -- because the threshold is a level on the dodge *ratio* and a pixel
+    is inked when its response falls at or below it. Both ends are far from the
+    measured values so a small rounding difference cannot flip the comparison.
+    """
+    from pcbart.lineart import line_art
+
+    from gui_mockup import READING_DODGE, READING_OPTIONS
+
+    ramp = np.tile(np.linspace(0, 255, 256, dtype=np.uint8), (256, 1))
+    picture = cv2.cvtColor(ramp, cv2.COLOR_GRAY2BGR)
+
+    order = [key for key, _label, _hint in READING_OPTIONS]
+    loaded.reading_combo.setCurrentIndex(order.index(READING_DODGE))
+    loaded.silhouette_check.setChecked(False)
+
+    def ink(threshold: int) -> int:
+        loaded.threshold_slider.setValue(threshold)
+        params = loaded._lineart_params()
+        traced = line_art(picture, None, params)
+        return int((traced < 128).sum())
+
+    low, high = ink(10), ink(90)
+
+    assert low > 0, "the ramp must produce some line at all"
+    assert high > low
+    # A superset in practice, not merely a different mask: every pixel inked at
+    # the low threshold is still inked at the high one.
+    loaded.threshold_slider.setValue(10)
+    small = line_art(picture, None, loaded._lineart_params()) < 128
+    loaded.threshold_slider.setValue(90)
+    large = line_art(picture, None, loaded._lineart_params()) < 128
+    assert not (small & ~large).any()
+
+
+def test_the_reset_button_restores_the_default_reading(loaded):
+    from gui_mockup import READING_FILL, READING_OPTIONS
+
+    order = [key for key, _label, _hint in READING_OPTIONS]
+    loaded.reading_combo.setCurrentIndex(order.index("outline"))
+    loaded.outline_density_slider.setValue(200)
+    loaded.outline_width_slider.setValue(80)
+
+    loaded._reset_tuning()
+
+    assert loaded.reading_combo.currentIndex() == order.index(READING_FILL)
+    assert loaded.outline_density_slider.value() == 60
+    assert loaded.outline_width_slider.value() == 20
+    assert not loaded.arc_smooth_check.isChecked(), "弧线平滑默认为关"
+
+
+def test_resetting_from_the_dodge_reading_puts_the_sliders_back(loaded):
+    """Reset has to undo the new reading's controls too.
+
+    They are hidden while 填充色块 is selected, so a value left behind would be
+    invisible until the user next picks 纯线条 -- exactly the kind of stale
+    state the panel's reset button exists to prevent.
+    """
+    from gui_mockup import READING_DODGE, READING_FILL, READING_OPTIONS
+
+    order = [key for key, _label, _hint in READING_OPTIONS]
+    loaded.reading_combo.setCurrentIndex(order.index(READING_DODGE))
+    loaded.strength_slider.setValue(300)
+    loaded.threshold_slider.setValue(90)
+
+    loaded._reset_tuning()
+
+    assert loaded.strength_slider.value() == 100
+    assert loaded.threshold_slider.value() == 46
+    assert loaded._reading() == READING_FILL
+    assert loaded.strength_row.isHidden()
+
+
+def test_arc_smoothing_runs_on_the_settled_pass_not_the_preview(loaded):
+    """⚠️ The switch must not put 1.8 s back into every slider tick.
+
+    Measured: the rest of the conversion is 36 ms on a 1024 px picture and
+    ``clean_strokes_with_arcs`` is **1824 ms** on top of it. Running it per tick
+    would reintroduce exactly the 调参卡顿 this panel was just fixed for, so it
+    is deliberately gated to ``max_side is None`` -- the settled
+    full-resolution conversion -- while the live preview stays at display
+    resolution. The user still sees the smoothed result, one beat after they
+    stop dragging rather than 20 times during the drag.
+    """
+    import pcbart.lineart as lineart
+    from pcbart.work_scale import prepare_working_image
+
+    calls = {"count": 0}
+    original = lineart.clean_strokes_with_arcs
+
+    def counted(mask, **kwargs):
+        calls["count"] += 1
+        return original(mask, **kwargs)
+
+    lineart.clean_strokes_with_arcs = counted
+    try:
+        loaded.arc_smooth_check.setChecked(True)
+        loaded._refresh_preview()          # the live path: must NOT smooth
+        assert calls["count"] == 0, "实时预览不该跑弧线平滑"
+
+        bgr, alpha, scale = prepare_working_image(
+            loaded._source_bgr, loaded._source_alpha
+        )
+        loaded._process(bgr, alpha, param_scale=scale)
+        assert calls["count"] == 1, "全分辨率那一遍必须跑弧线平滑"
+    finally:
+        lineart.clean_strokes_with_arcs = original
+        loaded.arc_smooth_check.setChecked(False)

@@ -63,6 +63,17 @@ def no_modal_can_block(monkeypatch):
     monkeypatch.setattr(QMessageBox, "exec", answer)
     for name in ("information", "warning", "critical", "question"):
         monkeypatch.setattr(QMessageBox, name, staticmethod(answer))
+    # 导出会问"普通打板还是彩印"（见 ask_print_kind）。这一层默认答"普通打板"，
+    # 也就是这些测试原本就在验的那条路径；要彩印的测试自己覆盖。
+    monkeypatch.setattr(
+        gui_mockup, "ask_print_kind",
+        lambda *args, **kwargs: gui_mockup.PRINT_NORMAL,
+    )
+    # 下单文件那条路会用"这是普通 Gerber"提示框问一次，默认当它点了继续。
+    monkeypatch.setattr(
+        gui_mockup, "_confirm_plain_gerber_for_pictures",
+        lambda *args, **kwargs: True,
+    )
 
 
 @pytest.fixture
@@ -74,7 +85,9 @@ def window(app, tmp_path):
     win.show()
     app.processEvents()
     yield win
-    win.hide()
+    from conftest import release_window
+
+    release_window(win)
 
 
 def artwork(tmp_path: Path) -> str:

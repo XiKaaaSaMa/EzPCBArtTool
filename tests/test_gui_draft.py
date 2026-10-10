@@ -70,7 +70,9 @@ def window(app):
     # Closing here would raise the unsaved-changes dialog. Hidden instead, so
     # the fixture never blocks on a modal window.
     win._draft_saved_fingerprint = None
-    win.hide()
+    from conftest import release_window
+
+    release_window(win)
 
 
 def edit_board(window) -> None:

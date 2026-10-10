@@ -3,8 +3,25 @@ shapely>=2.0
 numpy>=2.0
 opencv-python-headless>=4.10
 
+# ⚠️ **Required, not optional.** ``pcbart.image_size`` reads a picture's pixel
+# size with Pillow, and the framing/crop geometry cannot be built without it --
+# a missing Pillow raises at import, so the failure is loud rather than a silent
+# wrong crop. It is also used to embed pictures in .epro2, to render text masks
+# and to compose the board-painting tones.
+#
+# It was missing from this file until 2026-10-09: every development machine
+# happened to have it (OpenCV's tooling pulls it in), so a clean install came
+# up one dependency short and only failed when a picture was framed.
+Pillow>=10.0
+
 # Tests.
 pytest>=8.0
 
 # GUI (M1). The core library stays Qt-free; only the desktop app imports this.
 PySide6>=6.6
+
+# Optional, and deliberately commented out: the line-redraw reading runs
+# Anime2Sketch through PyTorch, and neither the model nor PyTorch is shipped.
+# Everything else works without it. See the README section "外接模型".
+# torch>=2.0
+

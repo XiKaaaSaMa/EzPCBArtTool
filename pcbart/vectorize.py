@@ -132,6 +132,31 @@ def vectorize_mask(
     raise ValueError(f"未知的铜层风格: {params.style}")
 
 
+def _as_grey_plane(source: np.ndarray) -> np.ndarray:
+    """Normalise any ink mask to a 0/255 grey plane.
+
+    Masks reach this module in more than one convention: the line-art pipeline
+    emits 0/255, a caller tracing a boolean array passes True/False, and another
+    passes 0/1. Treating the last two as grey levels is not a small mistake --
+    with ``ink_is_dark`` every value from 0 to 1 is below the threshold, so the
+    **entire rectangle becomes ink** and a QR symbol exports as a solid slab.
+    Booleans and 0/1 arrays are therefore scaled to 0/255 before thresholding,
+    which leaves a real 0/255 mask untouched.
+    """
+    import cv2
+
+    plane = np.asarray(source)
+    if plane.ndim == 3:
+        plane = cv2.cvtColor(plane, cv2.COLOR_BGR2GRAY)
+    if plane.dtype == bool:
+        return plane.astype(np.uint8) * 255
+    if plane.size and plane.dtype != np.uint8:
+        plane = plane.astype(np.uint8, copy=False)
+    if plane.size and int(plane.max()) <= 1:
+        return plane * 255
+    return plane
+
+
 def mask_to_complex_polygons(
     mask: np.ndarray,
     px_per_mm: float,
@@ -155,11 +180,7 @@ def mask_to_complex_polygons(
     if px_per_mm <= 0:
         raise ValueError("px_per_mm 必须为正数")
 
-    source = np.asarray(mask)
-    # Inputs arrive in several shapes: a strict 0/255 line art, a grey preview
-    # that was resampled, or a colour image. Collapse to one grey plane first.
-    if source.ndim == 3:
-        source = cv2.cvtColor(source, cv2.COLOR_BGR2GRAY)
+    source = _as_grey_plane(mask)
     # Ink is dark in the pipeline's output, so ink becomes the foreground.
     if params.ink_is_dark:
         binary = (source <= params.threshold).astype(np.uint8) * 255

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 from .epru import EproArchive, EproDocument, Record, new_id
 from .primitives import Point, board_outline_rect, convert_path_to_unit, polyline_path, poly
@@ -246,11 +246,21 @@ def circle_outline_record(
     )
 
 
+#: Width written into every ``FILL`` record, copied from the captured project.
+#:
+#: Duplicated from :mod:`pcbart.export` rather than imported: that module
+#: imports this one, so importing back would be a cycle. The value is the
+#: editor's own, and both writers have to agree on it or a cutout and the
+#: artwork beside it would claim different pen widths.
+_FILL_WIDTH_RAW = 0.2
+
+
 def fill_record(
     layer_id: int,
     rings_mm: list,
     width: float,
     document: EproDocument,
+    group_id: str = "",
 ) -> Record:
     """A ``FILL`` record for one complex polygon.
 
@@ -262,19 +272,180 @@ def fill_record(
     captured from a real project all carry ``0.2``; converting 0.2 mm to file
     units produced 7.874, and the field's unit is not something the capture
     settles. Matching the editor's own value beats guessing at a conversion.
+
+    ``group_id`` names the ``GROUP`` record this shape belongs to, as a
+    **string**; ``""`` is the ungrouped state. ⚠️ The field is not the same type
+    in both halves of the format -- PB primitives carry ``"groupId": 0`` when
+    ungrouped while symbol records carry ``"groupId": ""`` -- and in a
+    real hand-made card it is the **string** form that accompanies a ``GROUP``
+    record. Writing ``0`` for an ungrouped shape and a string number when
+    grouped matches what the editor itself produced.
+
+    ``rings_mm`` may hold :class:`pcbart.geometry.ArcRing` entries instead of
+    plain vertex lists. The ``FILL`` grammar carries curves natively -- the
+    template's own records mix ``L`` and ``ARC`` in one ring -- so a traced
+    curve does not have to be flattened into chords on the way out. Both kinds
+    go through :func:`pcbart.primitives.convert_path_to_unit`, which already
+    knows how to convert an ``ARC`` token's operands.
     """
-    from .geometry import complex_polygon_to_path
+    from .geometry import (
+        ArcRing,
+        arc_polygon_to_path,
+        complex_polygon_to_path,
+    )
     from .primitives import convert_path_to_unit, fill
 
-    path_mm = complex_polygon_to_path(rings_mm)
+    if rings_mm and isinstance(rings_mm[0], ArcRing):
+        path_mm = arc_polygon_to_path(rings_mm)
+    else:
+        path_mm = complex_polygon_to_path(rings_mm)
     body = fill(layer_id, path_mm, width)
     body["path"] = convert_path_to_unit(path_mm)
     body["width"] = width
+    body["groupId"] = group_id
 
     return Record(
         header={"type": "FILL", "ticket": document.next_ticket(), "id": new_id()},
         body=body,
     )
+
+
+def group_record(group, document: EproDocument, index: int | None = None) -> Record:
+    """A ``GROUP`` record: one set of primitives the editor treats as a unit.
+
+    ⚠️ **The whole encoding, because it is not inferable from the name.** A
+    group is declared by its own record and joined by the members' ``groupId``
+    fields; nothing about a member's geometry says it is grouped. Measured on a
+    card the user built in the editor, the record is::
+
+        {"type":"GROUP","ticket":2193,"id":"1"}||{"groupName":"group1"}
+
+    so the id is a **string**, the name lives in the payload under
+    ``groupName``, and members point at that id from their own payloads.
+
+    There is no ``firstTicket`` here. The hand-made files do carry one, and in
+    some of them it points at a ticket that does not exist -- so it is evidently
+    a hint the editor maintains for itself and not something a reader needs. A
+    group whose name is empty writes no ``groupName`` key at all rather than an
+    empty string, matching the records that were serialised without a name.
+    """
+    body: dict[str, Any] = {}
+    if str(getattr(group, "name", "")).strip():
+        body["groupName"] = str(group.name).strip()
+    return Record(
+        header={
+            "type": "GROUP",
+            "ticket": document.next_ticket(),
+            "id": str(getattr(group, "id", "")),
+        },
+        body=body,
+    )
+
+
+def outline_record_from_path(
+    path_mm: Sequence,
+    document: EproDocument,
+    line_width_mm: float = 0.125,
+) -> Record:
+    """Build a board-outline ``POLY`` from an existing token stream.
+
+    Used when the outline carries native ``ARC`` segments.  Going back through
+    a vertex list here would silently turn every rounded corner into a chord.
+    """
+    from .primitives import convert_path_to_unit
+    from .units import mm_to_unit
+
+    path = list(path_mm)
+    if len(path) < 3:
+        raise ValueError("a closed outline needs at least 3 vertices")
+    body = poly(11, path, line_width_mm)
+    body["path"] = convert_path_to_unit(path)
+    body["width"] = mm_to_unit(line_width_mm)
+    return Record(
+        header={"type": "POLY", "ticket": document.next_ticket(), "id": new_id()},
+        body=body,
+    )
+
+
+def decoration_records(
+    decorations: Sequence[dict],
+    document: EproDocument,
+) -> list[Record]:
+    """Fixed template artwork as ordinary ``FILL`` and ``POLY`` records.
+
+    The canvas draws the same data, so a decoration visible on screen is a
+    decoration in the file.  A closed stroke is closed explicitly: the source
+    circles and rectangles are outlines, not filled areas.
+    """
+    from .primitives import Point, convert_path_to_unit, poly
+    from .units import mm_to_unit
+
+    records: list[Record] = []
+    for item in decorations:
+        if not isinstance(item, dict):
+            continue
+        layer = int(item.get("layer", 0))
+        if item.get("kind") == "fill":
+            rings = item.get("rings") or []
+            if rings:
+                records.append(
+                    fill_record(layer, rings, _FILL_WIDTH_RAW, document)
+                )
+            continue
+
+        for line in item.get("paths") or []:
+            points = [Point(float(x), float(y)) for x, y in line]
+            if len(points) < 2:
+                continue
+            if item.get("closed") and points[0] != points[-1]:
+                points.append(points[0])
+            path = polyline_path(points)
+            body = poly(layer, path, float(item.get("width_mm", 0.254)))
+            body["path"] = convert_path_to_unit(path)
+            body["width"] = mm_to_unit(float(item.get("width_mm", 0.254)))
+            records.append(
+                Record(
+                    header={
+                        "type": "POLY",
+                        "ticket": document.next_ticket(),
+                        "id": new_id(),
+                    },
+                    body=body,
+                )
+            )
+    return records
+
+
+def raw_decoration_records(
+    decorations: Sequence[dict],
+    document: EproDocument,
+) -> list[Record]:
+    """Copy the template's own primitives back into a new project.
+
+    The bodies already carry EasyEDA's raw units and, for ``IMAGE``, its own
+    frame/angle/mirror fields.  Re-encoding them from sampled millimetres put
+    every image at a slightly different place from the source project; copying
+    them lets the editor apply the transform it wrote in the first place.
+    """
+    records: list[Record] = []
+    for item in decorations:
+        if not isinstance(item, dict):
+            continue
+        record_type = str(item.get("type") or "")
+        body = item.get("body")
+        if not record_type or not isinstance(body, dict):
+            continue
+        records.append(
+            Record(
+                header={
+                    "type": record_type,
+                    "ticket": document.next_ticket(),
+                    "id": new_id(),
+                },
+                body=dict(body),
+            )
+        )
+    return records
 
 
 def generate_outline_board(
@@ -285,14 +456,17 @@ def generate_outline_board(
     routing_corner: str = "L",
     editor_version: str = "",
     outer_circle: tuple[float, float, float] | None = None,
+    outer_path: Sequence | None = None,
+    raw_outline: Sequence[dict] = (),
     fills: Sequence[tuple[int, list, float]] = (),
+    cutouts: Sequence[Sequence[tuple[float, float]]] = (),
+    texts: Sequence = (),
+    decorations: Sequence[dict] = (),
+    raw_decorations: Sequence[dict] = (),
+    color_objects: Sequence[dict] = (),
+    groups: Sequence = (),
 ) -> Path:
-    """Write a board from an outer contour and its artwork.
-
-    Board cutouts are deliberately out of scope: they are the user's to place
-    in the editor, where a cutout is drawn interactively and the geometry can
-    be judged as it is made. This writer emits the outline and the artwork and
-    stops there.
+    """Write a board from an outer contour, its openings, wording and artwork.
 
     ``fills`` carries the artwork: ``(layer_id, complex_polygon_mm, width)``
     triples, each written as one ``FILL``. Any layer takes them -- copper for a
@@ -301,18 +475,26 @@ def generate_outline_board(
 
     They arrive already wound the way the editor needs -- outer clockwise, holes
     counter-clockwise -- because that decision belongs to whatever built the
-    geometry, not to the writer. A hole *inside a filled shape* is ordinary
-    ``FILL`` encoding and is unaffected by the above; only board cutouts are
-    gone.
+    geometry, not to the writer.
+
+    ``cutouts`` are the openings cut through the board. Each is written as a
+    ``FILL`` on the **MULTI layer** -- the layer that means "all layers", i.e.
+    material removed everywhere -- which is exactly how the template files the
+    user supplied encode their lanyard slot. ⚠️ This is *not* the hole feature
+    the project dropped in 2026-09: that was a hole **generator** (drill hits,
+    plated barrels, slot channels). This preserves an opening the template
+    already had, and a board exported without it comes back solid -- the canvas
+    would show a slot the fab never cuts.
+
+    ``texts`` are template wordings, written as the editor's own ``STRING``
+    records so they stay editable when the file is opened there.
     """
-    from .validation import check_outline
+    from .validation import check_outline, raise_for_errors
 
     outer = [(float(x), float(y)) for x, y in outer_mm]
 
     report = check_outline(outer)
-    if not report.ok:
-        details = "; ".join(str(issue) for issue in report.errors)
-        raise ValueError(f"外框未通过校验: {details}")
+    raise_for_errors(report, "外框未通过校验")
 
     document, _uuids = build_minimal_project(
         title=title,
@@ -320,11 +502,35 @@ def generate_outline_board(
         routing_corner=routing_corner,
     )
 
-    if outer_circle is not None:
+    # ⚠️ Groups first, and this is not a style choice. Members join a group by
+    # naming it from their own payload, so a FILL written before its GROUP
+    # record refers to something the document has not declared yet. The editor
+    # repairs what it can, but the file is then not the shape it was measured
+    # from. Appending them here also keeps them ahead of every geometry record
+    # below, which is the order the hand-made card uses.
+    for group in groups:
+        members = list(getattr(group, "members", ()) or ())
+        if len(members) < 2:
+            # A group with fewer than two live members is not a group. Writing
+            # one would put a row in the editor's element list that selects
+            # nothing, and the document already prunes these before export --
+            # this is the second line of defence for a hand-built board.
+            continue
+        document.append_to_section(group_record(group, document), doc_type="PCB")
+
+    if raw_outline:
+        for record in raw_decoration_records(raw_outline, document):
+            document.append_to_section(record, doc_type="PCB")
+    elif outer_circle is not None:
         document.append_to_section(
             circle_outline_record(
                 outer_circle[0], outer_circle[1], outer_circle[2], document, line_width_mm
             ),
+            doc_type="PCB",
+        )
+    elif outer_path:
+        document.append_to_section(
+            outline_record_from_path(outer_path, document, line_width_mm=line_width_mm),
             doc_type="PCB",
         )
     else:
@@ -333,13 +539,158 @@ def generate_outline_board(
             doc_type="PCB",
         )
 
-    for layer_id, rings_mm, fill_width in fills:
+    source_decorations = (
+        raw_decoration_records(raw_decorations, document)
+        if raw_decorations
+        else decoration_records(decorations, document)
+    )
+    for record in source_decorations:
+        document.append_to_section(record, doc_type="PCB")
+
+    # Colour pictures: an ``OBJ`` (the placement) **plus** a ``BLOB`` (the
+    # bytes it points at). ⚠️ Both records are required. The format reference
+    # says ``OBJ.path`` may carry a Data URL, but the editor reads only
+    # ``blob:<id>`` -- a file whose OBJ embedded its picture inline imported as
+    # an empty rectangle. The pair is written the way the editor writes it.
+    for pair in color_objects:
+        if not isinstance(pair, dict):
+            continue
+        blob = pair.get("blob")
+        if isinstance(blob, dict) and isinstance(blob.get("body"), dict):
+            document.append_to_section(
+                Record(
+                    header={
+                        "type": "BLOB",
+                        "ticket": document.next_ticket(),
+                        "id": str(blob.get("id") or new_id()),
+                    },
+                    body=dict(blob["body"]),
+                ),
+                doc_type="BLOB",
+            )
+        item = pair.get("object")
+        body = item.get("body") if isinstance(item, dict) else None
+        if not isinstance(body, dict):
+            continue
         document.append_to_section(
-            fill_record(layer_id, rings_mm, fill_width, document), doc_type="PCB"
+            Record(
+                header={
+                    "type": "OBJ",
+                    "ticket": document.next_ticket(),
+                    "id": str(item.get("id") or new_id()),
+                },
+                body=dict(body),
+            ),
+            doc_type="PCB",
         )
+
+    for record in fills:
+        # ⚠️ Not unpacked in the loop header. A ``CopperRecord`` unpacks to
+        # exactly ``(layer_id, rings, width)`` for every existing caller, but
+        # it also carries the group id as an *attribute* -- so the loop keeps
+        # the object and reads the three values off it. Unpacking first would
+        # throw the group away before it could be written.
+        layer_id, rings_mm, width_value = record
+        group_id = str(getattr(record, "group", "") or "")
+        document.append_to_section(
+            fill_record(
+                layer_id,
+                rings_mm,
+                float(width_value),
+                document,
+                group_id=group_id,
+            ),
+            doc_type="PCB",
+        )
+
+    multi_id = _layer_id("MULTI")
+    for ring in cutouts:
+        if len(ring) >= 3:
+            document.append_to_section(
+                fill_record(multi_id, [list(ring)], _FILL_WIDTH_RAW, document),
+                doc_type="PCB",
+            )
+
+    for item in texts:
+        record = text_record(item, document)
+        if record is not None:
+            document.append_to_section(record, doc_type="PCB")
 
     archive = EproArchive(document=document, meta={"title": title})
     return archive.write(output_path)
+
+
+def _layer_id(layer_type: str) -> int:
+    from .layers import layer_by_type
+
+    entry = layer_by_type(layer_type)
+    if entry is None:
+        raise KeyError(f"没有该层的 EasyEDA 定义: {layer_type}")
+    return entry.id
+
+
+#: Width written into a ``STRING`` record, matching the template files.
+TEXT_STROKE_RAW = 7.9921
+
+#: Where the editor's own ``STRING`` records put their z-order.
+TEXT_Z_INDEX = -1
+
+
+def text_record(item, document: EproDocument) -> Record | None:
+    """One template line as the editor's own ``STRING`` record.
+
+    Written as text rather than as traced outlines, because the whole point of
+    the user's request is that the wording stays editable -- a ten-millimetre
+    glyph exported as geometry would reach the EDA as a shape, and changing a
+    letter would mean redrawing it.
+
+    The fields and their values are copied from the template files the user
+    supplied: same origin (``LEFT_BOTTOM``), same angle convention, same
+    ``zIndex`` of ``-1``. Those files are the only evidence available for what
+    a hand-authored text record looks like, so matching them beats inventing a
+    plausible-looking set of defaults.
+    """
+    from .units import mm_to_unit
+
+    text = getattr(item, "text", "")
+    if not text:
+        return None
+
+    from .design_layers import LAYERS, LayerStack
+
+    # ``layer_for_name`` gives the layer's stable *key*; the file needs the
+    # EasyEDA type string, so the table is read for it rather than guessed by
+    # upper-casing the key (``silk_top`` would become ``SILK_TOP``, which is
+    # not a type the layer table has).
+    key = LayerStack().layer_for_name(getattr(item, "layer", ""))
+    entry = next((candidate for candidate in LAYERS if candidate.key == key), None)
+    layer_type = entry.easyeda_type if entry is not None else "TOP_SILK"
+    body = {
+        "partitionId": "",
+        "groupId": 0,
+        "layerId": _layer_id(layer_type),
+        "x": mm_to_unit(getattr(item, "x_mm", 0.0)),
+        "y": mm_to_unit(getattr(item, "y_mm", 0.0)),
+        "text": text,
+        "fontFamily": getattr(item, "font", "") or "default2",
+        # The editor stores the font size in the same units as everything else.
+        "fontSize": mm_to_unit(getattr(item, "size_mm", 1.0)),
+        "strokeWidth": TEXT_STROKE_RAW,
+        "bold": 0,
+        "italic": 0,
+        "origin": "LEFT_BOTTOM",
+        "angle": float(getattr(item, "rotation_deg", 0.0)),
+        "reverse": False,
+        "expansion": 0,
+        "mirror": False,
+        "locked": False,
+        "zIndex": TEXT_Z_INDEX,
+        "specialColor": None,
+    }
+    return Record(
+        header={"type": "STRING", "ticket": document.next_ticket(), "id": new_id()},
+        body=body,
+    )
 
 
 def generate_from_image(

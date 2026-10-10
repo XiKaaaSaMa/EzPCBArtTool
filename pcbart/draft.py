@@ -25,10 +25,17 @@ an edit, because it does not depend on anyone remembering to announce it.
 from __future__ import annotations
 
 import json
-from dataclasses import fields
+from dataclasses import fields, replace
 from pathlib import Path
 
-from .artboard import ArtBoard, BoardOutlineSpec, ImagePlacement
+from .artboard import (
+    ArtBoard,
+    BoardOutlineSpec,
+    CutoutElement,
+    ImagePlacement,
+    PlacementGroup,
+    TextElement,
+)
 from .design_layers import LAYER_KEYS, LayerStack
 
 __all__ = [
@@ -38,6 +45,7 @@ __all__ = [
     "DraftStore",
     "board_to_dict",
     "board_from_dict",
+    "apply_board_dict",
     "fingerprint",
     "save_draft",
     "load_draft",
@@ -77,6 +85,16 @@ def board_to_dict(board: ArtBoard) -> dict:
         "version": _VERSION,
         "outline": _dataclass_dict(board.outline),
         "placements": [_dataclass_dict(item) for item in board.placements],
+        "texts": [_dataclass_dict(item) for item in board.texts],
+        "cutouts": [_dataclass_dict(item) for item in board.cutouts],
+        "groups": [_dataclass_dict(item) for item in board.groups],
+        "operator_name": board.operator_name,
+        "operator_number": board.operator_number,
+        "operator_page": getattr(board, "operator_page", ""),
+        # The per-element overrides for the card's artwork. A plain dict, so
+        # it serialises as-is; a board that never touched them writes `{}` and
+        # reads back as automatic.
+        "art_choices": dict(getattr(board, "art_choices", None) or {}),
         "outline_ready": bool(board.outline_ready),
         "layers": {
             "current": board.layers.current,
@@ -108,9 +126,21 @@ def board_from_dict(data: dict) -> ArtBoard:
         raise ValueError("不是 PCB 艺术板草稿文件")
 
     outline = _build(BoardOutlineSpec, data.get("outline") or {})
-    board = ArtBoard(outline=outline, outline_ready=bool(data.get("outline_ready")))
+    board = ArtBoard(
+        outline=outline,
+        outline_ready=bool(data.get("outline_ready")),
+        operator_name=str(data.get("operator_name") or ""),
+        operator_number=str(data.get("operator_number") or ""),
+        operator_page=str(data.get("operator_page") or ""),
+        art_choices=dict(data.get("art_choices") or {}),
+        groups=[_build(PlacementGroup, item) for item in data.get("groups") or []],
+    )
     for item in data.get("placements") or []:
         board.placements.append(_build(ImagePlacement, item))
+    for item in data.get("texts") or []:
+        board.texts.append(_build(TextElement, item))
+    for item in data.get("cutouts") or []:
+        board.cutouts.append(_build(CutoutElement, item))
 
     layers = data.get("layers") or {}
     current = layers.get("current")
@@ -130,6 +160,85 @@ def _build(cls, values: dict):
         values = {}
     known = {field.name for field in fields(cls)}
     return cls(**{key: value for key, value in values.items() if key in known})
+
+
+def _restore_list(live: list, restored: list, cls) -> None:
+    """Copy ``restored`` into ``live`` in place, reusing the existing objects.
+
+    Matched by position and overwritten field by field, for the reason the
+    placements were already handled this way: a panel or the canvas may be
+    holding one of these objects, and swapping in fresh ones would leave that
+    reference pointing at something no longer in the document -- so the next
+    edit would change an object nothing draws.
+
+    Items past the end of the snapshot are dropped, and short snapshots append.
+    """
+    for index, item in enumerate(restored):
+        if index < len(live):
+            target = live[index]
+            for field_ in fields(cls):
+                setattr(target, field_.name, getattr(item, field_.name))
+        else:
+            live.append(item)
+    del live[len(restored) :]
+
+
+def apply_board_dict(board: ArtBoard, data: dict, *, include_layers: bool = True) -> None:
+    """Write a :func:`board_to_dict` snapshot back into a *live* document.
+
+    Undo needs the restored state to land in the objects everything else is
+    already holding. Building a new :class:`ArtBoard` -- what
+    :func:`board_from_dict` does -- would leave the canvas, the layer panel and
+    the board-setup panel pointing at the document that was just replaced, so
+    this mutates in place instead.
+
+    Placements are matched by *position*, reusing the existing objects and
+    overwriting their fields. Reusing them is what keeps a stale reference --
+    a panel's current placement, the canvas selection -- pointing at a real
+    object rather than one no longer on the board; the value it now carries is
+    the restored one. Objects past the end of the snapshot are dropped.
+
+    ``include_layers=False`` leaves the layer stack alone. Undo uses it because
+    which layers are shown is view state, not work: reverting an object's
+    position should not also switch a layer back on.
+
+    The board's outline caches are left alone deliberately: they are keyed on
+    the geometry they were computed from, so restored geometry misses the cache
+    and is recomputed, while untouched geometry keeps its cached trace.
+    """
+    restored = board_from_dict(data)
+
+    for field_ in fields(BoardOutlineSpec):
+        setattr(board.outline, field_.name, getattr(restored.outline, field_.name))
+
+    _restore_list(board.placements, restored.placements, ImagePlacement)
+    _restore_list(board.texts, restored.texts, TextElement)
+    _restore_list(board.cutouts, restored.cutouts, CutoutElement)
+
+    # ⚠️ Groups are restored by **matching id**, not by position, unlike the
+    # lists above. Those are matched positionally because a panel may be
+    # holding one of the objects; a group holds only ids, so the thing that has
+    # to stay stable is the membership, not the object identity. Restoring
+    # positionally would also fight the ids themselves: ``_restore_list``
+    # overwrites every field including ``element_id``, so a reordered group
+    # list would re-point at different artwork.
+    board.groups = [replace(group) for group in restored.groups]
+    for index, group in enumerate(board.groups):
+        group.members = list(restored.groups[index].members)
+
+    board.operator_name = restored.operator_name
+    board.operator_number = restored.operator_number
+    board.operator_page = restored.operator_page
+    # Replaced rather than merged: applying a snapshot has to put the document
+    # back exactly, including the choices the user had *not* made.
+    board.art_choices = dict(restored.art_choices)
+    board.outline_ready = restored.outline_ready
+    if include_layers:
+        # Mutated rather than swapped for the same reason the placements are:
+        # the image inspector holds a reference to the stack.
+        board.layers.current = restored.layers.current
+        for key in LAYER_KEYS:
+            board.layers.visible[key] = restored.layers.is_visible(key)
 
 
 def fingerprint(board: ArtBoard) -> str:

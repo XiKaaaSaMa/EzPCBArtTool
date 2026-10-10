@@ -29,6 +29,8 @@ __all__ = [
     "cache_dir",
     "drafts_dir",
     "default_output_dir",
+    "asset_root",
+    "badge_asset_dir",
 ]
 
 APP_DIR_NAME = "PCB艺术板工具"
@@ -122,3 +124,52 @@ def default_output_dir() -> Path:
         root.mkdir(parents=True, exist_ok=True)
         return root
     return Path("out")
+
+
+#: Where the artwork libraries live by default: a sibling of the project folder.
+#: They are gigabytes, so they must never be swept into a commit.
+#:
+#: ⚠️ **Derived from the project folder rather than written out.** A literal
+#: ``P:\...`` here would make the default correct on exactly one machine, and
+#: the symptom is not an error but *silent skipping* -- the tensor library simply
+#: reports "no operator database" and the panel shows an empty roster. Machines
+#: that keep the library elsewhere set :data:`ASSET_ROOT_ENV`.
+#: Frozen builds have no project folder beside them, so they must set it too.
+_ASSET_LIBRARY = Path(__file__).resolve().parent.parent.parent / "PCB艺术板工具素材库"
+
+ASSET_ROOT_ENV = "PCBART_ASSET_ROOT"
+"""Override for the library's location, for exactly the reason
+``PCBART_DRAFTS_DIR`` exists: a test or a script that reads the operator
+database must be able to point somewhere small and known, and a machine that
+keeps the library on another drive must be able to say so.
+
+The environment variable is a **root**, so pointing it at a test fixture means
+that fixture has to carry the same folder names the real library does
+(``01-干员代号\干员代号与编号.csv`` and friends). That is deliberate: a test
+that only had to supply the one file would pass while the shipped layout was
+wrong.
+"""
+
+
+def asset_root() -> Path:
+    """The artwork library root, whether or not it exists.
+
+    Returned even when missing -- callers ask "is the library here" rather than
+    being handed an exception, because on a machine that has never downloaded
+    it the honest state is "no operator database", not a crash.
+    """
+    override = os.environ.get(ASSET_ROOT_ENV)
+    return Path(override) if override else _ASSET_LIBRARY
+
+
+def badge_asset_dir() -> Path:
+    """The subset the 通行证 template draws from.
+
+    The folder is ``明日方舟-艺术板素材``: the icons the card composes plus the
+    generated QR and barcode sets. It replaced ``明日方舟-通行证素材``, which was
+    ~3.95 GB because it carried every 立绘 and 半身像 -- artwork the badge no
+    longer places. The old name is deliberately not used as a fallback: reading
+    a retired library silently would present artwork that is not part of the
+    current design as if it were.
+    """
+    return asset_root() / "明日方舟-艺术板素材"

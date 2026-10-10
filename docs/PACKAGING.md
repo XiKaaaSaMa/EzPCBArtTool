@@ -28,15 +28,27 @@
 > - 公测版 → `0.1.0`
 > - 正式版 → `1.0.0`
 
-**当前代码版本：`0.1.2`**（`pcbart/__init__.py` 的 `__version__`）。
-用户 2026-09-24 指定下一版为 **0.1.2**，**但还没打包**。
+**当前代码版本：`1.0.0`**（`pcbart/__init__.py` 的 `__version__`）。
+用户 2026-10-04 指定这一版为 **1.0.0（正式版）**，**但还没打包** ——
+用户明确「等我确认 bug 修完了再打包」。
 规则：**打包类型由用户决定，版本号跟着类型走**；`__version__` 只是"现在
 代码是什么版本"，安装包用 `/DAppVersion=` 单独给。
 
 ⚠️ **已交付的 0.1.1 安装包落后于当前代码。** 它不含之后做完的这些：
-**线稿改为填充色块读法**（深浅直接黑白替代）、
-画布快捷键与右键菜单、两色图片自动免处理、
-以及一批参数自适应加固（去碎屑核径按分辨率、整图统计限分辨率）。
+
+- **线稿改为填充色块读法**（深浅直接黑白替代）
+- 画布快捷键与右键菜单、两色图片自动免处理
+- 一批参数自适应加固（去碎屑核径按分辨率、整图统计限分辨率）
+- **拖图片边框改尺寸时画布不再跟着缩放**（原先边框追不上鼠标）
+- **画布黑底 + X/Y 坐标轴**（带刻度、毫米读数、方向箭头）
+- **由比滨线稿修复**（阈值按抠图主体算、轮廓只画最外层）
+- **界面重做：Material Design 3 + Iconoir 图标**
+- **界面配色可选**（18 预设 + 明暗 + 高级自定义），换色即时生效
+- **勾选框 / 滑块跟随主题色**（且修好了"启动时没应用主题"）
+
+⚠️ 主题相关的**新模块必须一起同步**，漏了会在启动时报
+`ModuleNotFoundError`：`pcbart/ui_theme.py`、`pcbart/ui_icons.py`、
+`tools/qt_theme.py`。
 
 ⚠️ **打包前必须先把源码同步到 `PCB工具打包测试\`**，
 否则会把旧行为又发出一次。这两份源码**不同步是常态**——
@@ -46,13 +58,32 @@
 
 ```bash
 # 在源码仓库与打包目录各跑一次，输出应完全一致。
-# 这四份是必须覆盖的：模型、草稿、多工程工作区、界面主体。
-md5sum pcbart/artboard.py pcbart/draft.py pcbart/projects.py tools/gui_mockup.py
+# 模型、草稿、多工程工作区、界面主体，以及主题相关的四个模块。
+md5sum pcbart/artboard.py pcbart/draft.py pcbart/projects.py \
+       pcbart/ui_theme.py pcbart/ui_icons.py \
+       tools/gui_mockup.py tools/qt_theme.py
 ```
 
-⚠️ `pcbart/projects.py` 是 0.1.1 新增的模块（工程栏的模型），
-同步时**容易漏**——它是新文件，不是被改的老文件。
-漏了它的症状是打包版启动即报 `ModuleNotFoundError: pcbart.projects`。
+⚠️ **同步时最容易漏的是「新增文件」**，因为它不是被改的老文件：
+
+| 模块 | 加入版本 | 漏了的症状 |
+|---|---|---|
+| `pcbart/projects.py` | 0.1.1 | 启动即报 `ModuleNotFoundError: pcbart.projects` |
+| `pcbart/ui_theme.py` | 0.1.2 | 同上（界面配色） |
+| `pcbart/ui_icons.py` | 0.1.2 | 同上（**生成文件**，要一起同步） |
+| `tools/qt_theme.py` | 0.1.2 | 同上（图标绘制与样式表） |
+| `pcbart/badge_art.py` | 0.1.2 | 通行证画布没有固定装饰，或导出丢边框/logo |
+| `pcbart/badge_decorations.py` | 0.1.2 | 同上（**生成模块**，用 `tools/extract_badge_art.py` 重建） |
+| `pcbart/qr_code.py` | 0.1.2 | 通行证二维码生成失败 |
+| `pcbart/code128.py` | 0.1.2 | 通行证条形码生成失败 |
+| `pcbart/badge_codes.py` | 0.1.2 | 二维码/条形码布局和短链入口缺失 |
+| `pcbart/short_url.py` | 0.1.2 | 批量短链工具无法调用 urlc.cn |
+| `pcbart/badge_short_urls.py` | 0.1.2 | 二维码退回长链接，v2、模块更小（**生成模块**，用 `tools/shorten_badge_urls.py` 重建；缺失时仍能回退） |
+
+⚠️ **`pcbart/ui_icons.py` 是生成文件，但必须进仓库、也必须同步**：
+图标以代码形式内嵌就是为了一打包就能用，它**不是**构建产物，
+打包前不需要重新生成（除非改了图标清单，那时见
+`docs/THIRD_PARTY.md` 里的生成命令）。
 
 ---
 
@@ -91,7 +122,7 @@ cd "P:\Zcode开发专用文件夹\PCB工具打包测试"
 python -m PyInstaller --clean --noconfirm "PCB艺术板工具.spec"
 
 :: 3) 生成安装包，版本号按第一节的规则填（先问用户是哪种版本）
-"%USERPROFILE%\InnoSetup\ISCC.exe" /DAppVersion=0.1.2 "安装包.iss"
+"%USERPROFILE%\InnoSetup\ISCC.exe" /DAppVersion=1.0.0 "安装包.iss"
 
 :: 4) 把安装包归档到 安装包保存区 下对应版本类型的子目录
 ```

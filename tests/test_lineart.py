@@ -248,6 +248,120 @@ def test_silhouette_outline_of_empty_alpha_is_empty():
     assert silhouette_outline(np.zeros((50, 50), np.uint8), 5).sum() == 0
 
 
+# ------------------------------------------------------- outer contour only
+
+from pcbart.lineart import outer_outline  # noqa: E402
+
+
+def test_the_outer_outline_ignores_holes_in_the_footprint():
+    """The defect that made the outline get switched off in the first place.
+
+    ``silhouette_outline`` rims every boundary the mask has, interior holes
+    included, and those rings land *inside* the filled artwork where they slice
+    the blocks apart -- the "不规则圈圈" the user reported five times. Tracing
+    the external contour cannot do that: one closed line per subject.
+    """
+    footprint = np.zeros((160, 160), np.uint8)
+    footprint[20:140, 20:140] = 1
+    footprint[60:100, 60:100] = 0          # an enclosed hole
+    footprint[110:120, 20:60] = 0          # a notch open to the left edge
+
+    from pcbart.lineart import silhouette_outline
+
+    ringed = silhouette_outline(footprint * 255, 3)
+    outer = outer_outline(footprint, 3)
+
+    # Both have to outline the outside.
+    assert outer[20, 80] > 0, "外轮廓必须画出来"
+    assert outer[130, 20] > 0, "左边缘（缺口以外）必须画出来"
+    # ...but only the old one draws a ring round the enclosed hole. Its ring
+    # sits on the hole's rim, at y=58/59 for a hole starting at y=60.
+    assert ringed[58, 80] > 0, "旧实现本来就该在孔洞边缘画圈"
+    assert outer[58, 80] == 0, "孔洞边缘不得画圈，否则会把墨块切开"
+    assert outer[80, 80] == 0, "孔洞内部不得有墨"
+    # A notch opens to the outside, so it is not a hole: its walls are part of
+    # the outer boundary and must still be traced. This is what separates
+    # "fill the holes" from "ignore anything concave".
+    assert outer[109, 40] > 0, "外部缺口的边缘属于外轮廓，必须保留"
+    assert outer[115, 60] > 0, "缺口内壁必须保留"
+    assert outer[115, 40] == 0, "缺口内部（轮廓之外）不得有墨"
+
+
+def test_the_outer_outline_stays_inside_the_footprint():
+    footprint = np.zeros((100, 100), np.uint8)
+    footprint[40:60, 40:60] = 1
+
+    outline = outer_outline(footprint, 9)
+
+    assert not ((footprint == 0) & (outline > 0)).any(), "轮廓不得超出主体"
+
+
+def test_the_outer_outline_of_an_empty_mask_is_empty():
+    assert outer_outline(None, 5).size == 0
+    assert outer_outline(np.zeros((40, 40), np.uint8), 5).sum() == 0
+
+
+def test_a_cut_out_picture_keeps_its_outer_edge_in_fill_mode():
+    """The user's complaint, as a test: the figure came out torn.
+
+    On a transparent cut-out the fill reading is the whole algorithm, and it
+    decides every pixel by tone. Wherever the subject is pale -- light hair,
+    bare skin -- nothing is dark enough to become ink, so with no outline the
+    figure has *no edge at all* on those stretches. Measured on the real
+    drawing: only 10.3% of the subject's boundary carried ink without the
+    outline against 71.4% with it.
+    """
+    image = np.zeros((200, 200, 4), np.uint8)
+    image[:, :, :3] = 235                       # a pale subject
+    image[40:160, 40:160, 3] = 255              # cut out of the transparent field
+
+    result = line_art(image, params=LineArtParams(silhouette=True))
+
+    border = np.zeros((200, 200), bool)
+    border[40:46, 40:160] = True                # a slice across the top edge
+    border[154:160, 40:160] = True
+    border[40:160, 40:46] = True
+    border[40:160, 154:160] = True
+    assert (result[border] < 128).any(), "浅色主体的外缘必须有墨，否则人是断开的"
+    assert result[100, 100] == 255, "主体内部仍是纸：这是填充读法，不是描边"
+
+
+def test_denoising_does_not_change_the_tone_split_of_a_cut_out():
+    """The second half of the complaint: 降噪开与关出来是两张画.
+
+    Otsu splits the histogram in two, and a cut-out picture is mostly white
+    background -- a single enormous spike at 255 once flattened onto paper. That
+    spike drags the level: measured on the real drawing it sat at 170 untouched
+    and jumped to 208 after a 5 px blur, which swallowed the pale hair whole.
+    Measuring over the subject instead keeps the level where the artwork is.
+    """
+    from pcbart.denoise import denoise_image
+
+    # ⚠️ These exact numbers are the fixture, not decoration. The subject takes
+    # only 18% of the frame, so the flattened background is one huge white
+    # spike; the pale tone sits at 198, just under the level the whole frame
+    # reports (measured: 198 blurred to 205, and the pale half flipped to ink).
+    # A larger subject or a paler tone does not reproduce it, so do not round
+    # them off.
+    image = np.zeros((240, 240, 4), np.uint8)
+    image[69:170, 69:170, :3] = 198             # pale half
+    image[69:170, 119:170, :3] = 120            # dark half
+    image[69:170, 69:170, 3] = 255
+
+    plain = line_art(image)
+    blurred = line_art(denoise_image(image, enabled=True, kernel_size=5))
+
+    assert plain[94, 94] == 255, "浅色半边必须是纸"
+    assert blurred[94, 94] == 255, "降噪后浅色半边仍然是纸"
+    assert plain[94, 144] == 0, "深色半边必须是墨"
+    assert blurred[94, 144] == 0, "降噪后深色半边仍然是墨"
+    plain_ink = (plain < 128).mean()
+    blurred_ink = (blurred < 128).mean()
+    assert abs(plain_ink - blurred_ink) < 0.05, (
+        f"开关降噪不该改变画面：{plain_ink:.3f} vs {blurred_ink:.3f}"
+    )
+
+
 def test_line_art_adds_the_outline_for_transparent_input():
     """End to end: a pale subject on a pale background keeps its boundary.
 
@@ -774,3 +888,197 @@ def test_the_interior_of_a_shaded_region_is_solid_ink():
 
     assert fill[150, 150] == 0, "填充读法：暗区内部应当是实心墨"
     assert traced[150, 150] == 255, "描边读法：暗区内部应当是纸"
+
+
+# ------------------------------------------------- the 描边 + 填充 reading
+
+
+def test_the_outline_reading_keeps_a_feature_the_fill_reading_loses():
+    """⚠️ The whole reason ``mode="outline"`` exists.
+
+    A light shape whose interior contains a *slightly* darker mark: the fill
+    reading sends the whole thing to one side of Otsu, so the mark vanishes;
+    the contour reading finds its boundary and keeps it. That is the user's own
+    comparison on the asset library -- eyebrows, chain links and cloth weave
+    disappearing into one flat silhouette.
+    """
+    # A dark field anchors the Otsu level low, so the whole light panel -- and
+    # the slightly darker mark inside it -- land on the paper side. The mark is
+    # then invisible to the fill reading by construction.
+    image = np.full((400, 400, 3), 240, np.uint8)
+    image[0:120, :] = 20
+    image[180:340, 60:340] = 222
+    image[240:270, 140:270] = 205
+
+    fill = line_art(image, params=LineArtParams(mode="fill", silhouette=False))
+    outline = line_art(image, params=LineArtParams(mode="outline", silhouette=False))
+
+    # The mark is light enough that Otsu keeps both sides as paper...
+    assert (fill[232:278, 132:278] == 0).sum() == 0, (
+        "填充读法：这道痕迹落在色块里，会消失"
+    )
+    # ...while the contour reading inks its boundary, so it survives.
+    assert (outline[232:278, 132:278] == 0).sum() > 200, "描边读法必须保留这道痕迹"
+
+
+def test_the_outline_reading_still_fills_its_darks():
+    """Lines *and* blocks, not lines instead of blocks.
+
+    A reading that only drew contours would leave every solid dark empty -- the
+    opposite failure, and the one the original "描边读法" had on shaded art.
+    """
+    image = np.full((300, 300, 3), 250, np.uint8)
+    image[80:220, 80:220] = 25
+
+    outline = line_art(image, params=LineArtParams(mode="outline"))
+
+    assert outline[150, 150] == 0, "暗色块内部必须是实心墨"
+    assert outline[10, 10] == 255, "背景保持纸"
+
+
+def test_the_outline_width_comes_from_millimetres():
+    """A wider 描边线宽 must ink more, and the conversion must use px_per_mm.
+
+    The user's complaint was that strokes came out *ragged* -- thick where the
+    tone change was gradual, missing where it was abrupt. Specifying the width
+    in millimetres is what removes that: the same board gets the same line
+    whatever the source resolution.
+
+    ⚠️ The fixture is a light shape on a dark field with 外轮廓描边 off, so the
+    fill pass leaves it as bare paper and *every* inked pixel comes from the
+    contour. On a dark shape the fill already covers the whole interior and the
+    contour's width is invisible -- which is exactly the shape of mistake this
+    pins: a width test that passes while the width does nothing.
+    """
+    image = np.full((400, 400, 3), 40, np.uint8)
+    image[100:300, 100:300] = 230
+
+    def ink(width_mm, px_per_mm):
+        result = line_art(
+            image,
+            params=LineArtParams(
+                mode="outline", silhouette=False, outline_width_mm=width_mm
+            ),
+            px_per_mm=px_per_mm,
+        )
+        return int((result == 0).sum())
+
+    thin = ink(0.10, 8.0)
+    thick = ink(0.50, 8.0)
+    widest = ink(1.00, 8.0)
+    assert thin < thick < widest, f"线宽必须随毫米值变粗：{thin} -> {thick} -> {widest}"
+
+    # Same millimetres at a finer trace must give the same *drawn* width, which
+    # is the whole reason the parameter is in millimetres.
+    from pcbart.lineart import _outline_width_px
+
+    params = LineArtParams(mode="outline", outline_width_mm=0.50)
+    assert _outline_width_px(params, 400, 8.0) == 5
+    assert _outline_width_px(params, 400, 16.0) == 9
+
+
+def test_the_outline_reading_is_off_flat_colour():
+    """A flat field must not stipple.
+
+    XDoG's test is a difference of two blurs, which on perfectly flat colour is
+    zero -- and zero hovers either side of the threshold, so the flat areas come
+    back as speckle. ``OUTLINE_EPSILON`` being negative is what biases the test
+    to "there is a real dark side here". Measured before the fix: 1.7% of the
+    frame speckled on colour fields containing no line at all.
+    """
+    # A flat field of *any* brightness. Note that a uniformly dark field is
+    # legitimately solid ink -- that is the fill pass, which is supposed to do
+    # that. What must not happen is the *contour* pass adding anything, so the
+    # comparison is against the fill reading's own output rather than against
+    # "no ink at all".
+    from pcbart.lineart import outline_lines
+
+    for level in (60, 180, 250):
+        flat = np.full((300, 300, 3), level, np.uint8)
+        contour, _level = outline_lines(
+            np.full((300, 300), level / 255.0, np.float32), 1.6, 0.06, None
+        )
+        assert int(contour.sum()) == 0, f"亮度 {level} 的纯色块不该有轮廓"
+
+        result = line_art(
+            flat, params=LineArtParams(mode="outline", silhouette=False)
+        )
+        fill = line_art(flat, params=LineArtParams(mode="fill", silhouette=False))
+        assert np.array_equal(result, fill), f"亮度 {level}：纯色块的轮廓读法应当等于填充读法"
+
+
+# ------------------------------------------------ the interactive cache
+
+
+def test_the_trace_cache_returns_the_same_pixels_as_no_cache():
+    """Caching must be invisible in the output, only in the cost."""
+    from pcbart.lineart import TraceCache
+
+    rng = np.random.default_rng(7)
+    image = rng.integers(40, 220, (240, 300, 3), dtype=np.uint8)
+    cache = TraceCache()
+
+    params = LineArtParams(silhouette=True)
+    first = line_art(image, params=params, trace_cache=cache)
+    second = line_art(image, params=params, trace_cache=cache)
+    plain = line_art(image, params=params)
+
+    assert np.array_equal(first, plain)
+    assert np.array_equal(second, plain), "第二次（命中缓存）必须逐像素一致"
+
+
+def test_the_trace_cache_drops_a_different_picture():
+    """⚠️ A cache that answered for the *previous* picture would be worse than
+    no cache: the canvas would show one artwork's mask over another's tones and
+    nothing would report it."""
+    from pcbart.lineart import TraceCache
+
+    dark = np.full((200, 200, 3), 30, np.uint8)
+    light = np.full((200, 200, 3), 230, np.uint8)
+    cache = TraceCache()
+
+    first = line_art(dark, trace_cache=cache)
+    second = line_art(light, trace_cache=cache)
+
+    assert np.array_equal(first, line_art(dark))
+    assert np.array_equal(second, line_art(light))
+
+
+def test_the_trace_cache_notices_a_changed_alpha():
+    """Changing 抠图 changes the mask, and the mask decides the Otsu sample."""
+    from pcbart.lineart import TraceCache
+
+    image = np.full((200, 200, 3), 150, np.uint8)
+    image[50:150, 50:150] = 60
+    cache = TraceCache()
+
+    left = np.zeros((200, 200), np.uint8)
+    left[:, :100] = 255
+    right = np.zeros((200, 200), np.uint8)
+    right[:, 100:] = 255
+
+    first = line_art(image, left, LineArtParams(silhouette=False), trace_cache=cache)
+    second = line_art(image, right, LineArtParams(silhouette=False), trace_cache=cache)
+
+    assert np.array_equal(first, line_art(image, left, LineArtParams(silhouette=False)))
+    assert np.array_equal(second, line_art(image, right, LineArtParams(silhouette=False)))
+
+
+# ---------------------------------------------------- arc smoothing
+
+
+def test_arc_smoothing_returns_a_binary_mask_of_the_same_size():
+    """It re-describes a boundary; it must not change the grid or add greys."""
+    from pcbart.lineart import clean_strokes_with_arcs
+
+    mask = np.full((240, 240), 255, np.uint8)
+    cv2.circle(mask, (120, 120), 60, 0, -1)
+
+    cleaned = clean_strokes_with_arcs(mask)
+
+    assert cleaned.shape == mask.shape
+    assert set(np.unique(cleaned)) <= {0, 255}
+    # It is a *smoothing*, not a replacement: the area stays close.
+    before = float((mask < 128).mean())
+    after = float((cleaned < 128).mean())
+    assert abs(before - after) < 0.05, f"面积变化过大：{before} -> {after}"

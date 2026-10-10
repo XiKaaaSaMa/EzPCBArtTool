@@ -61,8 +61,11 @@ def panel(app):
     widget.show()
     app.processEvents()
     yield widget
-    widget.hide()
-    window.hide()
+    from conftest import release_window
+
+    # The *window* is what has to be freed: the panel is its child, and freeing
+    # the panel alone leaves the window and its whole widget tree alive.
+    release_window(window)
 
 
 def select_shape(panel, shape: str) -> None:
@@ -639,14 +642,33 @@ def test_importing_a_picture_puts_it_on_the_canvas_without_a_board(app, tmp_path
         window.hide()
 
 
-def test_the_template_entry_is_visible_but_not_selectable(panel):
-    """Template files have not been supplied; the option must not pretend."""
+def test_the_template_entry_is_offered_and_usable(panel):
+    """The 通行证 card ships with the build, so 套用模板 does something."""
+    from pcbart.badge_card import TEMPLATE_NAME
+
     model = panel.shape_combo.model()
     item = model.item(panel.shape_combo.count() - 1)
 
     assert item is not None and item.text() == BoardSetupPanel.TEMPLATE_OPTION
-    assert not item.isEnabled()
-    assert not panel.template_combo.isEnabled()
+    assert item.isEnabled()
+    assert panel.template_combo.isEnabled()
+    assert TEMPLATE_NAME in [
+        panel.template_combo.itemText(i) for i in range(panel.template_combo.count())
+    ]
+
+
+def test_applying_the_badge_template_makes_the_card(panel):
+    """Choosing it has to change the board, not just the dropdown."""
+    from pcbart.badge_card import BADGE_HEIGHT_MM, BADGE_WIDTH_MM, TEMPLATE_NAME
+
+    panel.shape_combo.setCurrentIndex(panel.shape_combo.count() - 1)
+    panel.template_combo.setCurrentText(TEMPLATE_NAME)
+    panel._on_template_changed()
+
+    width, height = panel._board.size_mm()
+    assert width == pytest.approx(BADGE_WIDTH_MM, abs=0.01)
+    assert height == pytest.approx(BADGE_HEIGHT_MM, abs=0.01)
+    assert len(panel._board.outline_polygon()) >= 8
 
 
 @pytest.mark.parametrize(

@@ -29,6 +29,8 @@ __all__ = [
     "check_outline",
     "check_trace_width",
     "min_neck_width_mm",
+    "raise_for_errors",
+    "warning_sentence",
 ]
 
 # JLCPCB capabilities, converted to millimetres.
@@ -285,3 +287,35 @@ def check_trace_width(width_mm: float) -> list[Issue]:
             )
         ]
     return []
+
+
+def raise_for_errors(report: OutlineReport, prefix: str) -> None:
+    """Stop an export whose outline cannot be manufactured.
+
+    The counterpart to :func:`warning_sentence`: an error is a file that would
+    open and be wrong, so the export refuses; a warning is a board that will be
+    made and is fragile, so the export proceeds and says so.
+    """
+    if report.ok:
+        return
+    details = "；".join(str(issue) for issue in report.errors)
+    raise ValueError(f"{prefix}: {details}")
+
+
+def warning_sentence(report: OutlineReport) -> str:
+    """The report's warnings as one user-facing sentence, or an empty string.
+
+    ⚠️ **Warnings were being discarded, and that is a real defect rather than a
+    cosmetic one.** ``check_outline`` computes them and every export path threw
+    them away -- measured on a board with a 0.15 mm waist, ``min_neck_width_mm``
+    produced ``[warning] thin-neck`` and neither writer's ``note`` mentioned it.
+    The user got a board that snaps in the post and had no way to know from the
+    tool that it would. A warning the user never sees is not a warning.
+
+    Returns ``""`` when there is nothing to say, so a caller can concatenate it
+    unconditionally.
+    """
+    warnings = report.warnings
+    if not warnings:
+        return ""
+    return "⚠️ " + "；".join(issue.message for issue in warnings) + "。"

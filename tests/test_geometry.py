@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pcbart.geometry import (  # noqa: E402
     complex_polygon_to_path,
+    densify_path,
     ensure_ccw,
     ensure_cw,
     is_ccw,
@@ -138,7 +139,7 @@ def test_path_to_rings_handles_circle():
 
 def test_path_to_rings_handles_rectangle():
     rings = path_to_rings([Mode.R, 1.0, 2.0, 4.0, 6.0, 0, 0, 0])
-    assert rings[0] == [(1.0, 2.0), (5.0, 2.0), (5.0, 8.0), (1.0, 8.0)]
+    assert rings[0] == [(1.0, 2.0), (5.0, 2.0), (5.0, -4.0), (1.0, -4.0)]
 
 
 # ------------------------------------------------------------------ unit paths
@@ -201,3 +202,42 @@ def test_nested_complex_polygon_conversion():
     mm = convert_path_to_mm(raw)
     assert isinstance(mm[0], list) and isinstance(mm[1], list)
     assert mm[0][3] == pytest.approx(unit_to_mm(100), abs=1e-9)
+
+
+def test_a_rectangle_grows_downward_from_its_top_edge():
+    """``R x y w h`` anchors at the top edge, not the bottom.
+
+    Decoding it as ``y + h`` lifted every panel by its own height; the
+    通行证 artwork field landed above the card and the whole template looked
+    mis-positioned in the editor.
+    """
+    ring = densify_path(["R", 0.0, 10.0, 4.0, 2.0])[0]
+    ys = [y for _, y in ring]
+    assert min(ys) == pytest.approx(8.0)
+    assert max(ys) == pytest.approx(10.0)
+
+
+def test_a_rotated_rectangle_follows_its_angle():
+    ring = densify_path(["R", 0.0, 10.0, 4.0, 2.0, 90.0])[0]
+    xs = [x for x, _ in ring]
+    ys = [y for _, y in ring]
+    assert min(xs) == pytest.approx(0.0)
+    assert max(xs) == pytest.approx(2.0)
+    assert min(ys) == pytest.approx(10.0)
+    assert max(ys) == pytest.approx(14.0)
+
+
+def test_a_cubic_curve_is_sampled_between_its_endpoints():
+    """The two control points are not vertices of a polyline.
+
+    Treating them as vertices turned the card's vector logos and side text
+    into fans of chords, which then filled as solid ellipses.
+    """
+    path = [0.0, 0.0, "C", 0.0, 10.0, 10.0, 10.0, 10.0, 0.0]
+    points = densify_path(path, segments=8)[0]
+    assert points[0] == (0.0, 0.0)
+    assert points[-1] == (10.0, 0.0)
+    assert len(points) == 9
+    # A cubic from (0,0) to (10,0) with both controls above the chord has a
+    # midpoint above zero; a polyline through the controls would not.
+    assert max(y for _, y in points) > 7.0

@@ -81,6 +81,9 @@ def full_board() -> ArtBoard:
     board.placements.append(
         ImagePlacement(path="", layer="底层", tone="black", import_id="import-1")
     )
+    board.operator_name = "暮落"
+    board.operator_number = "VC07"
+    board.operator_page = "暮落(集成战略)"
     board.layers.set_current("top_silk")
     board.layers.set_visible("bottom_copper", False)
     board.layers.set_visible("outline", False)
@@ -114,9 +117,13 @@ def test_every_outline_field_survives(tmp_path):
     restored = load_draft(save_draft(board, tmp_path / "d.pcbdraft"))
 
     for field in board.outline.__dataclass_fields__:
-        assert getattr(restored.outline, field) == getattr(
-            board.outline, field
-        ), field
+        got = getattr(restored.outline, field)
+        want = getattr(board.outline, field)
+        # JSON has no tuples, so a tuple field comes back as a list; compare by
+        # value rather than by container type.
+        if isinstance(want, tuple):
+            got = tuple(got)
+        assert got == want, field
 
 
 def test_visibility_and_the_current_layer_survive(tmp_path):
@@ -271,6 +278,7 @@ def test_an_untouched_document_has_a_stable_fingerprint():
         lambda b: b.layers.set_visible("top_copper", False),
         lambda b: b.layers.set_current("bottom_silk"),
         lambda b: setattr(b, "outline_ready", False),
+        lambda b: setattr(b, "operator_page", "暮落"),
     ],
 )
 def test_every_change_makes_the_document_dirty(change):
@@ -396,3 +404,29 @@ def test_an_empty_library_lists_nothing_rather_than_failing():
     store = DraftStore(tempfile.mkdtemp())
 
     assert store.list() == []
+
+
+def test_the_generated_kind_survives_a_draft(tmp_path):
+    """``kind`` is what tells the canvas how to recolour the card's artwork.
+
+    The four generated elements are all "alpha is the shape", so the canvas
+    recolours them by their layer colour. Lose the field and a reopened draft
+    draws them as raw pixmaps: the QR symbol vanishes into the dark board and
+    the faction logo comes back as a white block.
+    """
+    from pcbart import badge_card, badge_content
+
+    board = ArtBoard(outline=badge_card.badge_spec(), outline_ready=True)
+    board.operator_name = "阿米娅"
+    board.operator_page = "阿米娅"
+    try:
+        art = badge_content.badge_art(board=board)
+    except badge_content.MissingArt:
+        pytest.skip("干员素材库未安装")
+    board.placements = list(art.placements)
+
+    restored = load_draft(save_draft(board, tmp_path / "d.pcbdraft"))
+    assert [item.kind for item in restored.placements] == [
+        item.kind for item in board.placements
+    ]
+    assert "qr" in {item.kind for item in restored.placements}

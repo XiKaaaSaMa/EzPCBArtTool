@@ -79,8 +79,11 @@ def painting_panel(app, tmp_path):
     panel.load_image(str(source))
     app.processEvents()
     yield panel
-    panel.hide()
-    window.hide()
+    from conftest import release_window
+
+    # The *window* is what has to be freed: the panel is its child, and freeing
+    # the panel alone leaves the window and its whole widget tree alive.
+    release_window(window)
 
 
 def imported(panel):

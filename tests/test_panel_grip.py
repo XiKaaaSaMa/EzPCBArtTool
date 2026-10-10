@@ -25,7 +25,7 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt  # noqa: E402
 from PySide6.QtGui import QMouseEvent  # noqa: E402
-from PySide6.QtWidgets import QApplication, QPushButton  # noqa: E402
+from PySide6.QtWidgets import QApplication, QPushButton, QWidget  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 
@@ -54,7 +54,14 @@ def window(app):
     win.show()
     app.processEvents()
     yield win
-    win.hide()
+    # ⚠️ Hidden, then actually destroyed. Hiding alone leaves the window and
+    # all of its widgets alive for the rest of the session, and a theme switch
+    # re-polishes every live widget -- so a run that accumulates hidden windows
+    # makes each later switch take seconds instead of milliseconds. `deleteLater`
+    # rather than `close()` because closing raises the unsaved-changes question.
+    from conftest import release_window
+
+    release_window(win)
 
 
 @pytest.fixture
@@ -452,3 +459,217 @@ def drag_zone(app, panel, zone, dx: int, dy: int) -> None:
         )
         app.sendEvent(grip, event)
     app.processEvents()
+
+
+# ---------------------------------------------------- the cursor leaves with it
+
+
+def hover(app, widget, point: QPointF) -> None:
+    """Deliver a pointer move to ``widget`` at one of its own positions."""
+    event = QMouseEvent(
+        QEvent.MouseMove,
+        point,
+        widget.mapToGlobal(point.toPoint()),
+        Qt.NoButton,
+        Qt.NoButton,
+        Qt.NoModifier,
+    )
+    app.sendEvent(widget, event)
+    app.processEvents()
+
+
+def effective_cursor(widget):
+    """The cursor Qt would show for this widget, inheritance included.
+
+    ⚠️ ``QWidget.cursor()`` already walks up the parent chain and returns the
+    nearest ancestor's cursor, so it reports the cursor the *user sees* here --
+    which is exactly the thing that was broken, and exactly what a test has to
+    look at. Checking ``panel.cursor()`` alone would pass even while every
+    child inside the panel was still showing a resize arrow.
+    """
+    return widget.cursor().shape()
+
+
+#: Cursor shapes that mean "dragging here resizes something". A widget inside
+#: a panel resolving to one of these is the reported bug: it inherited the
+#: border's cursor instead of showing the plain arrow.
+RESIZE_SHAPES = (
+    Qt.SizeHorCursor,
+    Qt.SizeVerCursor,
+    Qt.SizeFDiagCursor,
+    Qt.SizeBDiagCursor,
+)
+
+
+def isolated(panel, panels):
+    """Hide every panel but this one, so stacking cannot reroute the events.
+
+    The fixture shows all three panels at once and they overlap; a move aimed at
+    an obscured panel is delivered to whichever one is on top, which silently
+    made the check below look at the wrong window. Each panel is therefore
+    measured on its own.
+    """
+    for other in panels:
+        if other is not panel:
+            other.hide()
+    panel.show()
+    panel.raise_()
+    panel.place_top_right()
+
+
+def test_the_resize_cursor_does_not_follow_the_pointer_inside(panels, app):
+    """The reported bug: the border's resize arrow stayed on across the panel.
+
+    ⚠️ **The inward move has to go to the widget the pointer is really over.**
+    A real mouse move is delivered to the innermost widget under the cursor,
+    which inside a floating panel is some content widget -- not the panel.
+    Sending every move straight to the panel keeps re-running the panel's own
+    cursor logic and passes even with the bug present; the first version of this
+    test did exactly that and proved nothing.
+
+    What actually happens: the pointer crosses the 12 px border (the panel takes
+    that move and sets a resize cursor), then crosses into the content (a child
+    takes it, and the panel never hears about it again). The child has no cursor
+    of its own, so Qt resolves the nearest ancestor's -- and the resize arrow
+    stays on everywhere inside the panel.
+    """
+    failures = []
+    checked = 0
+    for panel in panels:
+        if panel.width() < 80 or panel.height() < 80:
+            continue
+        isolated(panel, panels)
+        app.processEvents()
+        for side in ("right", "left", "top", "bottom"):
+            seen = cross_border_inwards(panel, app, side)
+            checked += 1
+            stuck = seen & set(RESIZE_SHAPES)
+            if stuck:
+                failures.append(f"{type(panel).__name__}/{side}: {stuck}")
+    assert checked > 0, "没有任何面板被检查，测试没有真的跑"
+    assert not failures, "穿过边界进入面板后仍显示缩放箭头：" + "; ".join(failures)
+
+
+def inheriting_probes(panel):
+    """Inner widgets that have no cursor of their own.
+
+    ⚠️ **The probe has to be a widget that inherits its cursor.** Most controls
+    set their own -- a text box shows an I-beam, a button a pointing hand -- and
+    those are correct and unaffected by this bug. The defect only shows on a
+    widget that never set one, because that is the one Qt resolves up the parent
+    chain to the panel. Sampling whatever happens to be at the panel's centre
+    therefore measures the wrong thing: it landed on a QLineEdit under pytest
+    and on a QGroupBox in a script, giving opposite answers for the same build.
+    """
+    probes = []
+    for child in panel.findChildren(QWidget):
+        if child in panel.grips() or child is panel.title_bar:
+            continue
+        if not child.isVisibleTo(panel) or child.width() < 2 or child.height() < 2:
+            continue
+        # ``testAttribute`` is not enough: build a QCursor and see whether this
+        # widget has one of its own by comparing against the parent's while the
+        # parent is known to be unset is unreliable. Instead, look for the
+        # widgets that genuinely never set one -- the panel's own helper sets
+        # PointingHand/OpenHand/IBeam on the interactive ones, so anything left
+        # with the default is exactly the set that inherits.
+        if child.cursor().shape() in RESIZE_SHAPES:
+            probes.append(child)
+            continue
+        probes.append(child)
+    return probes
+
+
+def border_point(panel, side: str) -> QPoint:
+    """A point on one border that is **not covered by a grip**.
+
+    ⚠️ The visible grips sit in the border strip and take the mouse events over
+    themselves. Aiming at the middle of a side lands on a grip, where the
+    event never reaches the panel -- so the panel's own border handling is not
+    what gets exercised, and the test measures the wrong path. A quarter of the
+    way along the side is clear of both the edge grip and the corners.
+    """
+    if side in ("right", "left"):
+        x = panel.width() - 2 if side == "right" else 1
+        return QPoint(x, panel.height() // 4)
+    y = 1 if side == "top" else panel.height() - 2
+    return QPoint(panel.width() // 4, y)
+
+
+def cross_border_inwards(panel, app, side: str):
+    """Move onto one border, then inwards, and report the cursors seen inside.
+
+    Returns the set of shapes resolved by widgets inside the panel.
+    ``QWidget.cursor()`` walks the parent chain, so a shape of
+    ``SizeHorCursor`` here is what the user would actually see.
+    """
+    edge_pt = border_point(panel, side)
+    hover(app, panel, QPointF(edge_pt))
+    assert panel.cursor().shape() in RESIZE_SHAPES, f"{side} 边缘没有给出缩放光标"
+
+    # Move inwards, delivering to the widget that is really under the pointer.
+    inner_point = QPoint(panel.width() // 2, panel.height() // 2)
+    inner = panel.childAt(inner_point) or panel
+    hover(app, inner, QPointF(inner.mapFrom(panel, inner_point)))
+
+    # And report what every inheriting widget in the panel now resolves to --
+    # not just that one, because which widget sits at the centre depends on the
+    # panel's layout and on fonts, and that must not change the verdict.
+    return {
+        child.cursor().shape()
+        for child in inheriting_probes(panel)
+    }
+
+
+def test_leaving_the_border_clears_it_for_every_widget_inside(panels, app):
+    """Every widget in the panel, not just the first one the pointer meets.
+
+    The inherited cursor reaches arbitrarily deep: the viewport passes it to the
+    content widget, which passes it to the labels. One unchecked child is one
+    place the user can still see the wrong arrow.
+    """
+    checked = 0
+    for panel in panels:
+        if panel.width() < 80 or panel.height() < 80:
+            continue
+        isolated(panel, panels)
+        app.processEvents()
+        mid_x, mid_y = panel.width() // 2, panel.height() // 2
+        hover(app, panel, QPointF(panel.width() - 2, mid_y))
+        hover(app, panel, QPointF(mid_x, mid_y))
+
+        for child in panel.findChildren(QWidget):
+            if child in panel.grips() or child is panel.title_bar:
+                continue
+            if not child.isVisibleTo(panel):
+                continue
+            shape = child.cursor().shape()
+            assert shape not in RESIZE_SHAPES, (
+                f"{type(panel).__name__} 里的 {type(child).__name__} 继承了缩放箭头"
+            )
+            checked += 1
+    for panel in panels:
+        panel.show()
+    assert checked > 0
+
+
+def test_the_grips_keep_their_own_cursors(panels, app):
+    """Clearing the panel's cursor must not clear the handles' cursors.
+
+    The fix works by *unsetting* the panel's cursor, and the obvious way to get
+    that wrong is to unset it on everything -- which would leave the handles
+    with no hint at all, undoing the discoverability this whole area exists for.
+    """
+    for panel in panels:
+        before = {grip.zone: grip.cursor().shape() for grip in panel.grips()}
+        hover(app, panel, QPointF(panel.width() // 2, panel.height() // 2))
+        for grip in panel.grips():
+            assert grip.cursor().shape() == before[grip.zone], grip.zone
+
+
+def test_the_title_bar_keeps_its_move_cursor(panels, app):
+    """The title bar is dragged to move the panel, so a move cursor is right."""
+    for panel in panels:
+        assert panel.title_bar.cursor().shape() == Qt.SizeAllCursor
+        hover(app, panel, QPointF(panel.width() // 2, panel.height() // 2))
+        assert panel.title_bar.cursor().shape() == Qt.SizeAllCursor

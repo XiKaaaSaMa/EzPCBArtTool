@@ -21,9 +21,11 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import sys
 import time
 import uuid
+import warnings
 from dataclasses import replace
 from pathlib import Path
 
@@ -60,18 +62,50 @@ from pcbart.boardart import (  # noqa: E402
     layer_keys as board_art_layer_keys,
     tone_to_ink,
 )
+from pcbart import badge_card  # noqa: E402
+from pcbart import badge_content  # noqa: E402
 from pcbart.design_layers import LAYERS, LAYER_KEYS, LayerStack, layer  # noqa: E402
 from pcbart.draft import (  # noqa: E402
     DRAFT_FILTER,
     DRAFT_SUFFIX,
     DraftInfo,
     DraftStore,
+    apply_board_dict,
+    board_to_dict,
     default_draft_path,
     fingerprint,
     load_draft,
     save_draft,
 )
+from pcbart import operators  # noqa: E402
 from pcbart.projects import UNTITLED, Project, Workspace  # noqa: E402
+from pcbart.ui_theme import (  # noqa: E402
+    PRESETS,
+    ROLE_LABELS,
+    Scheme,
+    scheme_from_roles,
+    scheme_from_seed,
+    scheme_from_settings,
+    settings_for,
+    save_settings,
+    save_settings_keeping,
+)
+
+# The Qt half of the theme: icon rasterising, the control style and the
+# application-wide stylesheet. Imported the same careful way as the canvas,
+# because a packaged build resolves `tools.*` from its own bundle.
+try:
+    from tools.qt_theme import (  # noqa: E402
+        apply_scheme as qt_apply_scheme,
+        icon as qt_theme_icon,
+        style_window,
+    )
+except ImportError:  # running as a script, with tools/ itself on the path
+    from qt_theme import (  # noqa: E402
+        apply_scheme as qt_apply_scheme,
+        icon as qt_theme_icon,
+        style_window,
+    )
 
 # The canvas lives beside this file rather than inside it: it is a substantial
 # widget with its own geometry, and keeping it separate keeps this module
@@ -82,10 +116,22 @@ from pcbart.projects import UNTITLED, Project, Workspace  # noqa: E402
 # directory. A source run falls back to the sibling import, which is what the
 # CLI and the tests have always used.
 try:
-    from tools.design_canvas import DesignCanvas  # noqa: E402
+    from tools.design_canvas import (  # noqa: E402
+        CANVAS_BG,
+        GRID_MAJOR,
+        GRID_MINOR,
+        RULER_BG,
+        DesignCanvas,
+    )
 except ImportError:  # running as a script, with tools/ itself on the path
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from design_canvas import DesignCanvas  # noqa: E402
+    from design_canvas import (  # noqa: E402
+        CANVAS_BG,
+        GRID_MAJOR,
+        GRID_MINOR,
+        RULER_BG,
+        DesignCanvas,
+    )
 
 
 from PySide6.QtCore import (
@@ -119,11 +165,14 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFrame,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -141,34 +190,262 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-# ---------------------------------------------------------------- palette
+# ----------------------------------------------------------------- palette
+#
+# The colours below are module-level names, but they are **not constants**: the
+# user picks the colour scheme at runtime, so these are re-bound whenever the
+# theme changes. Every call site in this file interpolates them into a
+# stylesheet string at the moment it builds a widget, which is why re-binding
+# them is enough for the widgets built afterwards -- and why the theme switch
+# rebuilds the window rather than trying to mutate live widgets.
+#
+# They are read through ``_PALETTE`` so a lookup happens at call time rather
+# than an import-time copy being frozen into the module. A plain
+# ``WINDOW_BG = scheme["window"]`` would keep whichever scheme was active when
+# this module was imported, which is exactly the class of bug that already bit
+# this file once (a duplicated colour table that kept the old white canvas).
 
-WINDOW_BG = "#eef0f3"
-PANEL_BG = "#ffffff"
-BORDER = "#ccd2da"
-TEXT = "#1f2933"
-MUTED = "#6b7480"
-ACCENT = "#2563eb"
-SUCCESS = "#15803d"
-WARNING = "#b45309"
-DANGER = "#b91c1c"
-CANVAS_BG = "#ffffff"
-GRID_MINOR = "#e8ecf0"
-GRID_MAJOR = "#d3dae1"
-RULER_BG = "#f7f8fa"
-OUTLINE = "#c026d3"
-CUTOUT = "#b91c1c"
-DIM = "#2563eb"
+_PALETTE: "Scheme" = None  # type: ignore[assignment]
 
-TITLE_BAR_BG = WINDOW_BG
-"""Title-bar fill for an in-app floating panel: the same grey as the panel.
 
-The bar is an explicit colour rather than transparent. Only the title *text*
-carries no background, so it never shows a white box of its own.
-"""
+def set_palette(scheme) -> None:
+    """Re-bind the module's colour names to ``scheme``.
+
+    Called during startup and again on every theme switch. Widgets built
+    *after* this call pick up the new values directly; widgets built earlier
+    are brought along by :func:`restyle`, which re-runs the style builder each
+    of them registered through :func:`themed`.
+    """
+    global _PALETTE, WINDOW_BG, PANEL_BG, PANEL_ALT, BORDER, TEXT, MUTED
+    global ACCENT, ACCENT_TEXT, ACCENT_SOFT, ACCENT_SOFT_TEXT, HOVER, ACTIVE
+    global SUCCESS, WARNING, DANGER, ON_ACCENT, DISABLED_BG, DISABLED_TEXT
+    global WARNING_BG, WARNING_FG, WARNING_EDGE
+    global TITLE_BAR_BG, OUTLINE, CUTOUT, DIM
+
+    _PALETTE = scheme
+    WINDOW_BG = scheme["window"]
+    PANEL_BG = scheme["panel"]
+    PANEL_ALT = scheme["panel_alt"]
+    BORDER = scheme["border"]
+    TEXT = scheme["text"]
+    MUTED = scheme["muted"]
+    ACCENT = scheme["accent"]
+    ACCENT_TEXT = scheme["accent_text"]
+    ACCENT_SOFT = scheme["accent_soft"]
+    ACCENT_SOFT_TEXT = scheme["accent_soft_text"]
+    HOVER = scheme["hover"]
+    ACTIVE = scheme["active"]
+    SUCCESS = scheme["success"]
+    WARNING = scheme["warning"]
+    DANGER = scheme["danger"]
+    ON_ACCENT = scheme["on_accent"]
+    DISABLED_BG = scheme["disabled_bg"]
+    DISABLED_TEXT = scheme["disabled_text"]
+
+    # The warning banner's three colours come from the scheme's container pair
+    # plus the warning hue for its edge. Derived here once rather than spelled
+    # out at each call site: that is exactly how the old cream banner ended up
+    # frozen into a dark theme.
+    WARNING_BG = scheme["warning_container"]
+    WARNING_FG = scheme["on_warning_container"]
+    WARNING_EDGE = scheme["warning"]
+
+    TITLE_BAR_BG = WINDOW_BG
+    """Title-bar fill for an in-app floating panel: the window colour.
+
+    The bar is an explicit colour rather than transparent. Only the title
+    *text* carries no background, so it never shows a box of its own.
+    """
+
+    # Not part of the generated scheme: these three describe the *board*, not
+    # the interface, and follow the EDA layer table the canvas is drawn from.
+    # Re-stating them here keeps every colour name in one place.
+    OUTLINE = "#c026d3"
+    CUTOUT = "#b91c1c"
+    DIM = "#2563eb"
+
+
+def current_scheme():
+    """The scheme in force, loading the saved one on first use."""
+    global _PALETTE
+    if _PALETTE is None:
+        from pcbart.ui_theme import scheme_from_settings
+
+        set_palette(scheme_from_settings())
+    return _PALETTE
+
+
+# Bound at import so a module-level interpolation before the first
+# ``set_palette`` call still finds a colour rather than a NameError.
+set_palette(current_scheme())
 
 PANEL_WIDTH = 316
 SIDE_WIDTH = 296
+
+PREVIEW_DEBOUNCE_MS = 90
+"""How long the preview waits after the last tuning change before converting.
+
+Every step of a slider drag emits its own value. A conversion costs long enough
+that converting each step makes the window fall behind the handle, so the work
+is coalesced onto a short single-shot timer and only the value the user stopped
+on is computed. Short enough that a single click still feels immediate; long
+enough that a continuous drag produces one conversion instead of dozens.
+"""
+
+
+# ------------------------------------------------------------- themed styles
+#
+# Every per-widget stylesheet in this file interpolates theme colours, and a
+# widget's stylesheet is a *string*, not a live binding -- assign it once and
+# it keeps those colours forever. That is why the first version of the theme
+# switch rebuilt the whole window instead of restyling it.
+#
+# ``themed`` fixes that at the source: the widget keeps the *builder* rather
+# than only its result, so :func:`restyle` can ask it again after the palette
+# moves. Call sites that used to read
+#
+#     label.setStyleSheet(f"color: {MUTED}; ...")
+#
+# now read
+#
+#     themed(label, lambda: f"color: {MUTED}; ...")
+#
+# and the difference is that the f-string is re-evaluated on demand instead of
+# being frozen at construction.
+
+
+#: Attribute name the builder is stored under. Prefixed to stay clear of Qt's
+#: own properties and of this module's ``_``-prefixed private state.
+_BUILDER_ATTR = "_pcbart_style_builder"
+
+
+def themed(widget: QWidget, builder) -> QWidget:
+    """Give ``widget`` a stylesheet that is rebuilt when the theme changes.
+
+    ``builder`` is a zero-argument callable returning the stylesheet string.
+    It is invoked now and again by :func:`restyle`, which is what makes a
+    switch instant and complete instead of instant and partial.
+
+    ⚠️ **The builder is re-run, so it must read current state rather than
+    capture a decision made when the widget was built.** A builder that closes
+    over a boolean computed once will keep painting that old decision in the
+    new colours -- which looks like the theme half-applied.
+    """
+    setattr(widget, _BUILDER_ATTR, builder)
+    widget.setStyleSheet(builder())
+    return widget
+
+
+def muted(widget: QWidget, *, size: int = 11) -> QWidget:
+    """Style ``widget`` as secondary text: the muted colour at a small size.
+
+    A named helper rather than repeating the f-string forty times, and the one
+    place to change if the muted treatment ever does. It also makes the intent
+    legible at the call site -- ``muted(note)`` says *why* the widget is grey,
+    where a stylesheet says only *that* it is.
+    """
+    return themed(widget, lambda: f"color: {MUTED}; font-size: {size}px;")
+
+
+#: Semantic text tones a status label can carry. Named rather than passed as a
+#: colour so the builder can look the colour up *again* after a theme change --
+#: capturing the value instead would replay the old one on every restyle.
+TONES = {
+    "muted": lambda: MUTED,
+    "text": lambda: TEXT,
+    "success": lambda: SUCCESS,
+    "warning": lambda: WARNING,
+    "danger": lambda: DANGER,
+    "accent": lambda: ACCENT,
+}
+
+
+def tone(widget: QWidget, name: str, *, size: int = 11) -> QWidget:
+    """Colour ``widget`` by semantic tone, and keep it correct across themes.
+
+    The distinction from :func:`muted` matters for any label whose colour is a
+    *decision*: a validation note that turns red, an import note that turns
+    green. Writing those as ``f"color: {DANGER}"`` bakes in the shade, so a
+    later theme change leaves the note in the old palette's red.
+
+    Here the widget remembers the **tone** ("this is an error") and the colour
+    is looked up whenever the stylesheet is built -- including on every later
+    theme change.
+    """
+    if name not in TONES:
+        raise KeyError(f"未知的文字色调: {name}（可用: {', '.join(TONES)}）")
+    lookup = TONES[name]
+
+    def build() -> str:
+        return f"color: {lookup()}; font-size: {size}px;"
+
+    return themed(widget, build)
+
+
+def warn_surface(
+    widget: QWidget, *, size: int | None = None, padding: str = "5px 8px"
+) -> QWidget:
+    """A banner or status box in the warning container colours.
+
+    Named as a *surface* rather than a colour because the three values
+    (background, text, edge) have to move together. The warning hue is a
+    mid-tone in a light theme and near-white in a dark one, so pairing a new
+    background with an old text colour is exactly how a banner becomes
+    unreadable after a theme change.
+    """
+
+    def build() -> str:
+        size_part = f" font-size: {size}px;" if size else ""
+        return (
+            f"background: {WARNING_BG}; color: {WARNING_FG};"
+            f" border: 1px solid {WARNING_EDGE};"
+            f" border-radius: 4px; padding: {padding};{size_part}"
+        )
+
+    return themed(widget, build)
+
+
+def info_surface(widget: QWidget, *, padding: str = "6px 8px") -> QWidget:
+    """A plain boxed readout: panel background, hairline edge, body text.
+
+    For panel status lines that are informational rather than warnings, so an
+    announcement like "当前：异形板" does not shout in the warning colour when
+    nothing is wrong.
+    """
+
+    def build() -> str:
+        return (
+            f"background: {PANEL_BG}; border: 1px solid {BORDER};"
+            f" border-radius: 4px; padding: {padding}; font-size: 11px;"
+        )
+
+    return themed(widget, build)
+
+
+def restyle(root: QWidget) -> int:
+    """Re-run every registered style builder under ``root``.
+
+    Returns how many widgets were restyled, so a test can assert that the walk
+    actually found something rather than passing because both sides are empty.
+
+    Widgets are collected with :meth:`QWidget.findChildren`, which walks the
+    live tree -- so a deleted panel is simply absent rather than a dangling
+    reference to guard against.
+    """
+    count = 0
+    candidates = [root, *root.findChildren(QWidget)]
+    for widget in candidates:
+        builder = getattr(widget, _BUILDER_ATTR, None)
+        if builder is None:
+            continue
+        try:
+            widget.setStyleSheet(builder())
+        except RuntimeError:
+            # The C++ object is gone but Python still holds a wrapper. Not an
+            # error worth surfacing: the widget is no longer on screen.
+            continue
+        count += 1
+    return count
 
 
 def section(title: str, compact: bool = False) -> QGroupBox:
@@ -186,25 +463,26 @@ def section(title: str, compact: bool = False) -> QGroupBox:
         f"{padding_top}px 7px 5px 7px" if compact else f"{padding_top}px 9px 7px 9px"
     )
     box = QGroupBox(title)
-    box.setStyleSheet(
-        f"""
-        QGroupBox {{
-            background: {PANEL_BG};
-            border: 1px solid {BORDER};
-            border-radius: 4px;
-            margin-top: 0px;
-            padding: {padding};
-            font-weight: 600;
-        }}
-        QGroupBox::title {{
-            subcontrol-origin: padding;
-            subcontrol-position: top left;
-            left: 2px;
-            top: 2px;
-            padding: 0;
-            color: {TEXT};
-        }}
-        """
+    themed(
+        box,
+        lambda: f"""
+                    QGroupBox {{
+                        background: {PANEL_BG};
+                        border: 1px solid {BORDER};
+                        border-radius: 4px;
+                        margin-top: 0px;
+                        padding: {padding};
+                        font-weight: 600;
+                    }}
+                    QGroupBox::title {{
+                        subcontrol-origin: padding;
+                        subcontrol-position: top left;
+                        left: 2px;
+                        top: 2px;
+                        padding: 0;
+                        color: {TEXT};
+                    }}
+        """,
     )
     return box
 
@@ -279,10 +557,31 @@ def row(label: str, widget: QWidget, hint: str = "") -> QWidget:
     layout.addWidget(line)
     if hint:
         note = QLabel(hint)
-        note.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        muted(note)
         note.setWordWrap(True)
         note.setContentsMargins(104, 0, 0, 0)
         layout.addWidget(note)
+    return holder
+
+
+def colour_row(label: str, swatch: QWidget) -> QWidget:
+    """A label with its colour chip immediately beside it.
+
+    Separate from :func:`row` because that helper stretches its widget to fill
+    the line, which is right for a combo box and wrong for a fixed-size chip:
+    stretched, the chip drifts to the far right edge and the eye has to travel
+    across the whole panel to pair a name with its colour.
+    """
+    holder = QWidget()
+    layout = QHBoxLayout(holder)
+    layout.setContentsMargins(0, 2, 0, 2)
+    layout.setSpacing(8)
+
+    name = QLabel(label)
+    name.setMinimumWidth(96)
+    layout.addWidget(name)
+    layout.addWidget(swatch)
+    layout.addStretch(1)
     return holder
 
 
@@ -506,6 +805,57 @@ STYLE_OPTIONS: tuple[tuple[str, str], ...] = (
 RAW_STYLE = "__raw__"
 
 
+#: How the 线稿风格 reduces a picture to black and white, in the order the
+#: combo shows them. ``(key, label, description)``.
+#:
+#: The readings answer different questions and a picture has to pick one, so
+#: this is a choice rather than a single "best" default:
+#:
+#: * ``fill`` splits the picture at one level, so *everything* is either black
+#:   or white. It is right for flat two-tone drawings and it is what the
+#:   project calibrated against a hand-made Photoshop reference.
+#: * ``outline`` adds a contour pass on top of the same split, so boundaries
+#:   that are neither dark nor light enough to cross the level -- eyebrows, the
+#:   links of a chain, cloth weave -- survive as lines instead of being
+#:   swallowed into a block. It is right for soft-shaded illustrations, which
+#:   is what the asset library contains.
+#: * ``dodge`` asks "is this pixel darker than its neighbourhood?" and ignores
+#:   absolute brightness, so a dark costume that ``fill`` would flood into one
+#:   black mass comes out as its contour lines. Measured on the dark
+#:   illustration that prompted it: fill 15.2% ink as a black block, dodge 11.5%
+#:   as pure line work with the costume lines, the leg rings and the gun intact.
+#:   It is not better across the board -- on a pale flat drawing its ratio
+#:   response turns texture noise into a mesh of hairlines, which is what 降噪
+#:   is for -- so the description below names both audiences rather than
+#:   claiming a winner.
+#:
+#: ⚠️ ``dodge`` **must stay at the end of the tuple**. ``_reset_tuning``
+#: returns to index 0 and several tests look options up by key, but the default
+#: reading is a promise as well: inserting above ``fill`` would silently change
+#: what a fresh import does.
+READING_FILL = "fill"
+READING_OUTLINE = "outline"
+READING_DODGE = "dodge"
+
+READING_OPTIONS: tuple[tuple[str, str, str], ...] = (
+    (
+        READING_FILL,
+        "填充色块（默认）",
+        "用一个明暗分界把图分成黑白两块：适合纯色线稿，细节少但干净",
+    ),
+    (
+        READING_OUTLINE,
+        "描边 + 填充",
+        "先找轮廓再补上暗部色块：适合有明暗过渡的立绘，眉毛、链条、布料纹理能保留",
+    ),
+    (
+        READING_DODGE,
+        "纯线条",
+        "只描「比周围暗」的边，深色立绘不会被涂成黑块；浅色平涂图容易把纹理描成碎网，可勾选降噪",
+    ),
+)
+
+
 def layer_options(side: str) -> list[tuple[str, tuple[str, ...], str]]:
     """How the artwork is realised in physical layers, for one board side.
 
@@ -575,25 +925,26 @@ def segmented(options: list[str], current: int = 0) -> QWidget:
         # selector, so the radius is decided here rather than in the sheet.
         left = 3 if index == 0 else 0
         right = 3 if index == last else 0
-        button.setStyleSheet(
-            f"""
-            QPushButton {{
-                background: {PANEL_BG};
-                border: 1px solid {BORDER};
-                padding: 3px 14px;
-                color: {TEXT};
-                border-top-left-radius: {left}px;
-                border-bottom-left-radius: {left}px;
-                border-top-right-radius: {right}px;
-                border-bottom-right-radius: {right}px;
-            }}
-            QPushButton:checked {{
-                background: {ACCENT};
-                border-color: {ACCENT};
-                color: white;
-                font-weight: 600;
-            }}
-            """
+        themed(
+            button,
+            lambda: f"""
+                            QPushButton {{
+                                background: {PANEL_BG};
+                                border: 1px solid {BORDER};
+                                padding: 3px 14px;
+                                color: {TEXT};
+                                border-top-left-radius: {left}px;
+                                border-bottom-left-radius: {left}px;
+                                border-top-right-radius: {right}px;
+                                border-bottom-right-radius: {right}px;
+                            }}
+                            QPushButton:checked {{
+                                background: {ACCENT};
+                                border-color: {ACCENT};
+                                color: white;
+                                font-weight: 600;
+                            }}
+            """,
         )
         group.addButton(button, index)
         layout.addWidget(button)
@@ -839,14 +1190,15 @@ class CaptionButton(QPushButton):
         self.setToolTip(tooltip)
         self.setFixedSize(self.SIZE, self.SIZE)
         self.setCursor(Qt.PointingHandCursor)
-        self.setStyleSheet(
-            f"""
+        themed(
+            self,
+            lambda: f"""
             QPushButton {{
                 background: transparent; border: none; border-radius: 3px;
             }}
-            QPushButton:hover {{ background: #e2e7ee; }}
-            QPushButton:pressed {{ background: #d3dae3; }}
-            """
+            QPushButton:hover {{ background: {HOVER}; }}
+            QPushButton:pressed {{ background: {ACTIVE}; }}
+            """,
         )
         self.clicked.connect(on_click)
 
@@ -910,8 +1262,10 @@ class PanelTitleBar(QWidget):
         layout.setSpacing(2)
 
         self.label = QLabel(title)
-        self.label.setStyleSheet(
-            f"color: {TEXT}; font-weight: 600; background: transparent; border: none;"
+        themed(
+            self.label,
+            lambda: f"color: {TEXT}; font-weight: 600;"
+            "background: transparent; border: none;",
         )
         layout.addWidget(self.label)
         layout.addStretch(1)
@@ -1203,14 +1557,15 @@ class FloatingPanel(QWidget):
         super().__init__(parent)
         self.setObjectName("FloatingPanel")
         self.setAttribute(Qt.WA_StyledBackground, True)
-        self.setStyleSheet(
-            f"""
+        themed(
+            self,
+            lambda: f"""
             QWidget#FloatingPanel {{
                 background: {WINDOW_BG};
                 border: 1px solid {BORDER};
                 border-radius: {self.RADIUS}px;
             }}
-            """
+            """,
         )
         # The panel chooses its own size; only a floor is imposed.
         self.setMinimumSize(self.MIN_WIDTH, self.MIN_HEIGHT)
@@ -1249,14 +1604,15 @@ class FloatingPanel(QWidget):
         self._footer = QWidget()
         self._footer.setObjectName("PanelFooter")
         self._footer.setAttribute(Qt.WA_StyledBackground, True)
-        self._footer.setStyleSheet(
-            f"""
+        themed(
+            self._footer,
+            lambda: f"""
             QWidget#PanelFooter {{
                 background: {WINDOW_BG};
                 border-bottom-left-radius: {max(0, self.RADIUS - 1)}px;
                 border-bottom-right-radius: {max(0, self.RADIUS - 1)}px;
             }}
-            """
+            """,
         )
         self._footer_layout = QVBoxLayout(self._footer)
         self._footer_layout.setContentsMargins(6, 4, 6, 6)
@@ -1270,14 +1626,15 @@ class FloatingPanel(QWidget):
         self._content.setAttribute(Qt.WA_StyledBackground, True)
         # Rounded at the bottom, because this fills the panel's lower area and
         # would otherwise square off the corners the panel rounds.
-        self._content.setStyleSheet(
-            f"""
+        themed(
+            self._content,
+            lambda: f"""
             QWidget#PanelContent {{
                 background: {WINDOW_BG};
                 border-bottom-left-radius: {max(0, self.RADIUS - 1)}px;
                 border-bottom-right-radius: {max(0, self.RADIUS - 1)}px;
             }}
-            """
+            """,
         )
         self._scroll.setWidget(self._content)
 
@@ -1297,6 +1654,9 @@ class FloatingPanel(QWidget):
         self._resize_edge = ""
         self._resize_press: QPoint | None = None
         self._resize_origin: QRect | None = None
+        self._cursor_edge = ""
+        """The border zone the cursor is currently showing, so it is only
+        changed when it actually changes -- see :meth:`_apply_edge_cursor`."""
         self.setMouseTracking(True)
 
         # Created last so they sit above the scroll area and the footer in the
@@ -1313,6 +1673,13 @@ class FloatingPanel(QWidget):
             grip.raise_()
 
         parent.installEventFilter(self)
+
+        # Watch pointer moves application-wide so a border cursor is cleared
+        # even when the move lands on a child. See ``watch_pointer``.
+        self._pointer_watch_installed = False
+        application = QApplication.instance()
+        if application is not None:
+            self.watch_pointer(application)
 
     def grips(self) -> list[ResizeGrip]:
         """Every resize handle, in a stable order."""
@@ -1600,22 +1967,94 @@ class FloatingPanel(QWidget):
             event.accept()
             return
 
-        self.setCursor(self._cursor_for(self._edge_at(event.position().toPoint())))
+        self._apply_edge_cursor(event.position().toPoint())
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         if self.is_resizing():
             self.end_resize()
+            self._apply_edge_cursor(event.position().toPoint())
             event.accept()
             return
         super().mouseReleaseEvent(event)
 
-    def leaveEvent(self, event) -> None:  # noqa: N802
-        if not self._resize_edge:
-            self.setCursor(Qt.ArrowCursor)
-        super().leaveEvent(event)
+    def _apply_edge_cursor(self, pos: QPoint) -> None:
+        """Show a resize cursor on the border, and nothing anywhere else.
+
+        ⚠️ **The fix is ``unsetCursor``, not ``setCursor(Qt.ArrowCursor)``.**
+        Both make the panel itself read as an arrow, so both look right when you
+        check ``panel.cursor()`` -- which is why the first version of this was
+        wrong and the first version of its test passed anyway.
+
+        What actually happens with an explicit arrow: Qt resolves a child's
+        cursor by walking *up* the parent chain until it finds a widget that has
+        one set. An explicit ``ArrowCursor`` **is** a set cursor, so it satisfies
+        that walk -- and every widget inside the panel which never set a cursor
+        of its own (a group box, a plain container) inherits the arrow from the
+        panel instead of falling through to the default. That is harmless on its
+        own, but the *previous* cursor is the problem: while the pointer is on
+        the border the panel holds e.g. ``SizeHorCursor``, and the moment the
+        pointer crosses into the content the panel stops receiving moves, so its
+        stale resize cursor keeps being inherited by everything inside.
+
+        ``unsetCursor`` removes the panel from that walk entirely, so each child
+        resolves its own cursor -- a grip its arrow, a button its pointing hand,
+        a text box its I-beam, and everything else the plain default.
+        """
+        edge = self._edge_at(pos)
+        if edge == self._cursor_edge:
+            return
+        self._cursor_edge = edge
+        if edge:
+            self.setCursor(self._cursor_for(edge))
+        else:
+            self.unsetCursor()
+
+    def clear_border_cursor(self) -> None:
+        """Drop a resize cursor that is still set after the pointer left.
+
+        ⚠️ **Needed because the panel only sees moves while the pointer is over
+        the panel itself.** Once the pointer crosses into the content, the move
+        events go to the child widget and the panel's ``mouseMoveEvent`` never
+        runs -- so if the panel was left holding a resize cursor from the border
+        it keeps holding it, and every child that has no cursor of its own
+        inherits the arrow.
+
+        Whoever sees the pointer move anywhere else in the window calls this, so
+        the stale cursor is cleared as soon as the pointer is known to be off
+        the panel.
+        """
+        if self._cursor_edge or self.cursor().shape() != Qt.ArrowCursor:
+            self._cursor_edge = ""
+            self.unsetCursor()
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt naming
+        # Application-wide pointer moves: clear a border cursor once the pointer
+        # has moved onto the *content*. The panel cannot do this itself, because
+        # the moment the pointer leaves the border the events go to a child and
+        # the panel's own mouseMoveEvent stops running -- which is exactly how a
+        # resize cursor ended up stuck across the whole panel body.
+        #
+        # ``watched is not self`` matters: an event delivered to the panel is
+        # the border case, and must be left to the panel's own handler or the
+        # cursor would be cleared in the same breath it was set.
+        if (
+            event.type() == event.Type.MouseMove
+            and getattr(self, "_pointer_watch_installed", False)
+            and watched is not self
+            and not isinstance(watched, ResizeGrip)
+            and self._cursor_edge
+            and not self.is_resizing()
+        ):
+            local = self._local_point(event)
+            # Two cases both mean "the border cursor is no longer wanted":
+            # a child inside the panel took the move (the pointer is over the
+            # content), or the move happened outside the panel entirely.
+            on_content = isinstance(watched, QWidget) and self.isAncestorOf(watched)
+            off_panel = local is None or not self.rect().contains(local)
+            if on_content or off_panel:
+                self.clear_border_cursor()
+
         # Follow the application window: a maximised panel keeps filling it and
         # a floating one keeps its distance from the right edge.
         if watched is self.parentWidget() and event.type() == event.Type.Resize:
@@ -1630,6 +2069,53 @@ class FloatingPanel(QWidget):
                 self.clamp_inside_parent()
                 self.place_top_right()
         return super().eventFilter(watched, event)
+
+    def _local_point(self, event) -> QPoint | None:
+        """Where a mouse event happened, in this panel's own coordinates."""
+        try:
+            return self.mapFromGlobal(event.globalPosition().toPoint())
+        except AttributeError:  # pragma: no cover - event without a position
+            return None
+
+    def watch_pointer(self, app) -> None:
+        """Clear a lingering border cursor when the pointer leaves the panel.
+
+        The panel's own ``mouseMoveEvent`` only fires while the pointer is over
+        the panel; the moment it crosses into the content, the child widget
+        receives the move and the panel hears nothing more. Without this, a
+        resize cursor picked up on the border stays set -- and every child
+        without a cursor of its own inherits it.
+
+        An application-wide event filter is the smallest hook that sees every
+        move regardless of which widget consumes it. The filter only inspects
+        the position and clears this panel's own cursor, so it is cheap and
+        cannot swallow the event.
+
+        ⚠️ **The filter holds this panel alive and is called for every event in
+        the application**, so it has to be removed when the panel goes away.
+        It is not a leak in normal use -- a panel lives as long as its window --
+        but a long-lived process that opens and closes windows would accumulate
+        filters, and every one of them runs on every event. ``destroyed`` is the
+        hook that cannot be forgotten, because Qt emits it however the widget
+        dies.
+        """
+        self._pointer_watch_app = app
+        app.installEventFilter(self)
+        self._pointer_watch_installed = True
+        self.destroyed.connect(self._drop_pointer_watch)
+
+    def _drop_pointer_watch(self, *_args) -> None:
+        """Detach the application-wide filter when this panel is destroyed."""
+        app = getattr(self, "_pointer_watch_app", None)
+        if app is None or not getattr(self, "_pointer_watch_installed", False):
+            return
+        try:
+            app.removeEventFilter(self)
+        except (RuntimeError, TypeError):
+            # Either side already gone; nothing left to detach.
+            pass
+        self._pointer_watch_installed = False
+
 
 
 class ImageView(QWidget):
@@ -1862,7 +2348,7 @@ class PreviewPanel(FloatingPanel):
         bar_layout.addStretch(1)
 
         self.info_label = QLabel("尚未载入")
-        self.info_label.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        muted(self.info_label)
         bar_layout.addWidget(self.info_label)
         layout.addWidget(bar)
 
@@ -1873,7 +2359,7 @@ class PreviewPanel(FloatingPanel):
             "滚轮缩放，拖动平移，双击适应窗口。滑轮与列表均不响应滚轮，避免误改数值。"
         )
         self.hint.setWordWrap(True)
-        self.hint.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        muted(self.hint)
         layout.addWidget(self.hint)
 
         self.fit_button.clicked.connect(self.view.fit)
@@ -1981,6 +2467,28 @@ class PreprocessPanel(FloatingPanel):
         publish: a colour picture left unprocessed goes to the board exactly as
         the file has it."""
 
+        self._trace_cache = None
+        """Keeps the picture-derived half of the line-art pass between ticks.
+
+        A slider drag recomputes the conversion on every step, and most of that
+        work -- compositing, desaturating, building the subject mask, reading
+        the Otsu level -- is a function of the picture and not of any setting on
+        the panel. Measured on 2000 px library artwork: 3.4 s per tick without
+        this, about 0.11 s with it. That difference is the "调参数非常卡" the
+        user reported. See :class:`pcbart.lineart.TraceCache`."""
+
+        self._preview_timer: QTimer | None = None
+        """Coalesces a burst of slider values into one conversion.
+
+        Each step of a drag emits its own signal, and a preview takes long
+        enough that computing every step queues work faster than it drains --
+        the window then lags behind the handle. Restarting a short single-shot
+        timer per step means only the value the user stopped on is computed."""
+
+        from pcbart.lineart import TraceCache
+
+        self._trace_cache = TraceCache()
+
         self._source_description: str = ""
         """The picture's own description, without the board suffix.
 
@@ -2003,10 +2511,7 @@ class PreprocessPanel(FloatingPanel):
             "选「彩色丝印」则保留原图配色。"
         )
         banner.setWordWrap(True)
-        banner.setStyleSheet(
-            f"background: #fff8e6; color: {WARNING}; border: 1px solid #f0d9a8;"
-            f"border-radius: 4px; padding: 5px 8px;"
-        )
+        warn_surface(banner)
         layout.addWidget(banner)
 
         upload = section("1 · 上传图片", compact=True)
@@ -2017,7 +2522,7 @@ class PreprocessPanel(FloatingPanel):
         upload_layout.addWidget(self.drop_zone)
         self.source_note = QLabel("尚未载入图片")
         self.source_note.setWordWrap(True)
-        self.source_note.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        muted(self.source_note)
         upload_layout.addWidget(self.source_note)
         layout.addWidget(upload, 1)
 
@@ -2040,7 +2545,7 @@ class PreprocessPanel(FloatingPanel):
         process_layout.addWidget(self.process_check)
         self.process_note = QLabel()
         self.process_note.setWordWrap(True)
-        self.process_note.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        muted(self.process_note)
         process_layout.addWidget(self.process_note)
         layout.addWidget(process_group)
         self.process_group = process_group
@@ -2053,7 +2558,7 @@ class PreprocessPanel(FloatingPanel):
         style_layout.addWidget(row("风格", self.style_combo))
         self.style_note = QLabel()
         self.style_note.setWordWrap(True)
-        self.style_note.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        muted(self.style_note)
         self.style_note.setContentsMargins(104, 0, 0, 0)
         style_layout.addWidget(self.style_note)
         layout.addWidget(style_group)
@@ -2084,7 +2589,7 @@ class PreprocessPanel(FloatingPanel):
         layer_layout.addWidget(self.presentation_row)
         self.layer_note = QLabel()
         self.layer_note.setWordWrap(True)
-        self.layer_note.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        muted(self.layer_note)
         self.layer_note.setContentsMargins(104, 0, 0, 0)
         layer_layout.addWidget(self.layer_note)
         self.layer_group = layer_group
@@ -2094,10 +2599,7 @@ class PreprocessPanel(FloatingPanel):
         self.rule_note.setVisible(False)
         self.rule_note.setMinimumHeight(34)
         self.rule_note.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self.rule_note.setStyleSheet(
-            f"background: #fff8e6; color: {WARNING}; border: 1px solid #f0d9a8;"
-            f"border-radius: 4px; padding: 5px 8px; font-size: 11px;"
-        )
+        warn_surface(self.rule_note, size=11)
         layer_layout.addWidget(self.rule_note)
         layout.addWidget(layer_group)
 
@@ -2110,25 +2612,78 @@ class PreprocessPanel(FloatingPanel):
         tune_layout.setContentsMargins(0, 0, 0, 0)
         tune_layout.setSpacing(3)
 
+        # 读法 first: it changes which of the controls below mean anything, so
+        # offering them in the other order invites the user to tune a slider
+        # that the current reading ignores -- the "dead control" problem this
+        # panel has already been reported for twice.
+        self.reading_combo = combo([label for _key, label, _hint in READING_OPTIONS])
+        self.reading_combo.currentIndexChanged.connect(self._on_reading_changed)
+        tune_layout.addWidget(row("读法", self.reading_combo))
+        self.reading_note = QLabel()
+        self.reading_note.setWordWrap(True)
+        muted(self.reading_note)
+        self.reading_note.setContentsMargins(104, 0, 0, 0)
+        tune_layout.addWidget(self.reading_note)
+
         self.strength_slider = NoWheelSlider(Qt.Horizontal)
         self.strength_slider.setRange(20, 400)
         self.strength_slider.setValue(100)
         self.strength_slider.valueChanged.connect(self._on_tuning_changed)
-        tune_layout.addWidget(
-            row("线条粗细", self.strength_slider, "在线稿下调节笔画粗细；1.00 为标定值")
+        self.strength_row = row(
+            "线条粗细", self.strength_slider, "纯线条读法下的笔画粗细；1.00 为标定值"
         )
+        tune_layout.addWidget(self.strength_row)
 
         self.threshold_slider = NoWheelSlider(Qt.Horizontal)
         self.threshold_slider.setRange(2, 98)
         self.threshold_slider.setValue(46)
         self.threshold_slider.valueChanged.connect(self._on_tuning_changed)
-        tune_layout.addWidget(
-            row("墨量阈值", self.threshold_slider, "越低墨越多；输出恒为纯黑白")
+        self.threshold_row = row(
+            "墨量阈值",
+            self.threshold_slider,
+            "纯线条读法下越高墨越多、细碎线也越多；输出恒为纯黑白",
         )
+        tune_layout.addWidget(self.threshold_row)
+
+        # The contour controls, shown only for the 描边读法. The width is a
+        # millimetre value because that is what the board sees; the detail
+        # scale is a picture fraction because it selects what counts as a line.
+        self.outline_width_slider = NoWheelSlider(Qt.Horizontal)
+        self.outline_width_slider.setRange(10, 100)
+        self.outline_width_slider.setValue(20)
+        self.outline_width_slider.valueChanged.connect(self._on_tuning_changed)
+        self.outline_width_row = row(
+            "描边线宽",
+            self.outline_width_slider,
+            "描边在成品上的宽度（0.10–1.00 mm）；低于 0.10 mm 嘉立创做不出来",
+        )
+        tune_layout.addWidget(self.outline_width_row)
+
+        self.outline_detail_slider = NoWheelSlider(Qt.Horizontal)
+        self.outline_detail_slider.setRange(4, 60)
+        self.outline_detail_slider.setValue(16)
+        self.outline_detail_slider.valueChanged.connect(self._on_tuning_changed)
+        self.outline_detail_row = row(
+            "细节尺度",
+            self.outline_detail_slider,
+            "越小越能看清细线，也越容易把纹理当成线；越大越干净",
+        )
+        tune_layout.addWidget(self.outline_detail_row)
+
+        self.outline_density_slider = NoWheelSlider(Qt.Horizontal)
+        self.outline_density_slider.setRange(10, 250)
+        self.outline_density_slider.setValue(60)
+        self.outline_density_slider.valueChanged.connect(self._on_tuning_changed)
+        self.outline_density_row = row(
+            "描边密度",
+            self.outline_density_slider,
+            "保留多少轮廓：小=只留最明显的边，大=细节更多、墨也更多",
+        )
+        tune_layout.addWidget(self.outline_density_row)
 
         self.tune_note = QLabel("载入图片后可实时调节")
         self.tune_note.setWordWrap(True)
-        self.tune_note.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        muted(self.tune_note)
         tune_layout.addWidget(self.tune_note)
 
         preview_row = QWidget()
@@ -2182,11 +2737,20 @@ class PreprocessPanel(FloatingPanel):
         silhouette_layout.setContentsMargins(0, 2, 0, 0)
         silhouette_layout.setSpacing(6)
         self.silhouette_check = QCheckBox("补主体外轮廓")
-        self.silhouette_check.setChecked(True)
+        # ⚠️ **Off by default, at the user's request.** This draws a contour
+        # around the subject's outer edge. It helps a cut-out figure read as a
+        # single shape, but it is also ink the picture does not have -- and on
+        # an illustration whose own outline is already closed it only thickens
+        # the silhouette. 「补主体外轮廓」 is therefore an opt-in.
+        #
+        # It affects **only the line-art image**. An irregular board outline is
+        # cut from ``image_prep.subject_mask`` (see ``pcbart.compose``), which
+        # does not read this flag, so switching it off cannot change the board.
+        self.silhouette_check.setChecked(False)
         self.silhouette_check.setToolTip(
             "线稿算法看不到主体的外边界（浅色主体对浅色背景时尤其明显），"
-            "此选项补上主体的外边界。异形板框识别依赖这条线；"
-            "有透明通道时取其边界，没有时按图片边缘的颜色推断主体。"
+            "勾选后补上主体的外边界。只影响线稿图案本身；"
+            "异形板框始终自己取主体轮廓，不受这个开关影响。"
         )
         self.silhouette_check.stateChanged.connect(self._on_tuning_changed)
         silhouette_layout.addWidget(self.silhouette_check)
@@ -2199,13 +2763,25 @@ class PreprocessPanel(FloatingPanel):
         silhouette_layout.addStretch(1)
         denoise_layout.addWidget(silhouette_row)
 
+        # 弧线平滑 is its own switch, separate from every style, because it is
+        # the one step whose cost is measured in seconds rather than
+        # milliseconds. See `clean_strokes_with_arcs` for the trade.
+        self.arc_smooth_check = QCheckBox("弧线平滑（清毛刺）")
+        self.arc_smooth_check.setToolTip(
+            "把线稿的锯齿边缘重新描成平滑曲线。\n"
+            "实测可把碎块减少 23–43%，细节总量基本不变；\n"
+            "代价是这一步本身要跑几秒，所以只在需要时打开。"
+        )
+        self.arc_smooth_check.stateChanged.connect(self._on_tuning_changed)
+        denoise_layout.addWidget(self.arc_smooth_check)
+
         self.denoise_note = QLabel(
             "独立步骤：先降噪，再提取线稿。关闭降噪时线条提取完全不受影响。"
             "轮廓补线优先取透明通道；没有透明通道时按图片边缘的颜色推断主体，"
             "因此任何图片都适用。"
         )
         self.denoise_note.setWordWrap(True)
-        self.denoise_note.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        muted(self.denoise_note)
         denoise_layout.addWidget(self.denoise_note)
 
         layout.addWidget(denoise)
@@ -2229,9 +2805,12 @@ class PreprocessPanel(FloatingPanel):
 
         self.preview_note = QLabel("按当前风格全分辨率重算，可缩放对比细节")
         self.preview_note.setWordWrap(True)
-        self.preview_note.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        muted(self.preview_note)
         preview_layout_group.addWidget(self.preview_note)
         layout.addWidget(preview_group)
+
+        self.redraw_section = self._build_redraw_section()
+        layout.addWidget(self.redraw_section)
 
         # Importing is a deliberate step, so it gets its own action. This is
         # the click that turns the preview into board geometry, so it is pinned
@@ -2241,24 +2820,25 @@ class PreprocessPanel(FloatingPanel):
         self.import_button.setMinimumHeight(32)
         self.import_button.setEnabled(False)
         self.import_button.setToolTip("载入图片后可导入")
-        self.import_button.setStyleSheet(
-            f"""
-            QPushButton {{
-                background: {ACCENT}; color: white; border: none;
-                border-radius: 3px; font-weight: 600;
-            }}
-            QPushButton:hover {{ background: #1d4ed8; }}
-            QPushButton:pressed {{ background: #1e40af; }}
-            QPushButton:disabled {{
-                background: #c3ccd8; color: #f2f4f7;
-            }}
-            """
+        themed(
+            self.import_button,
+            lambda: f"""
+                            QPushButton {{
+                                background: {ACCENT}; color: white; border: none;
+                                border-radius: 3px; font-weight: 600;
+                            }}
+                            QPushButton:hover {{ background: #1d4ed8; }}
+                            QPushButton:pressed {{ background: #1e40af; }}
+                            QPushButton:disabled {{
+                                background: #c3ccd8; color: #f2f4f7;
+                            }}
+            """,
         )
         self.import_button.clicked.connect(self.import_to_canvas)
 
         self.import_note = QLabel("载入图片后，先把参数调好，再点此导入画布")
         self.import_note.setWordWrap(True)
-        self.import_note.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        muted(self.import_note)
         self.set_footer(self._build_import_footer())
 
         # Changing 风格 or 呈现方式 moves the imported picture to the layers
@@ -2266,6 +2846,146 @@ class PreprocessPanel(FloatingPanel):
         self.style_combo.currentIndexChanged.connect(self._on_style_changed)
         self.layer_combo.currentIndexChanged.connect(self._on_presentation_changed)
         self._refresh_layers()
+
+    def _build_redraw_section(self) -> QGroupBox:
+        """The entry point for the optional, externally supplied model.
+
+        The redraw reading needs weights that are deliberately **not** shipped
+        (183 MB against a 178 MB installer, and a CPU run peaks at 4.6 GB), so
+        the capability has to advertise itself or nobody would know it exists.
+        This section is that advertisement, and it is honest about which of the
+        three things it needs is missing: the model folder, or PyTorch, or
+        nothing.
+        """
+        box = section("9 · 线稿重绘（外接模型）", compact=True)
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        note = QLabel(
+            "让模型照着原图重新画一遍线稿：细眉毛、链条、衣褶不会糊成色块，"
+            "适合线条密集的插画。模型不随软件分发，需要自己指定文件夹。"
+        )
+        note.setWordWrap(True)
+        muted(note)
+        layout.addWidget(note)
+
+        self.redraw_status = QLabel()
+        self.redraw_status.setWordWrap(True)
+        layout.addWidget(self.redraw_status)
+
+        self.redraw_button = QPushButton("外接模型设置与说明…")
+        self.redraw_button.setMinimumHeight(28)
+        self.redraw_button.setToolTip(
+            "重绘要用外接的 Anime2Sketch 模型，这里可以看状态、指定模型文件夹"
+        )
+        self.redraw_button.clicked.connect(self._on_external_redraw)
+        layout.addWidget(self.redraw_button)
+        self._refresh_redraw_section()
+        return box
+
+    def _redraw_status(self) -> tuple[str, str]:
+        """``(tone, sentence)`` for the external-model section.
+
+        Split out from the widget so the wording is testable without a window,
+        and so the three states are written in one place: ready, model missing,
+        runtime missing.
+        """
+        from pcbart.model_paths import (
+            DEFAULT_VARIANT,
+            check_model_dir,
+            resolve_model_dir,
+            torch_available,
+        )
+
+        directory = resolve_model_dir()
+        report = check_model_dir(directory, DEFAULT_VARIANT)
+        if not report["ok"]:
+            return (
+                "warning",
+                f"⚠️ 尚未安装：缺少 {'；'.join(report['missing'])}。"
+                f"当前文件夹：{directory}",
+            )
+        if not torch_available():
+            return (
+                "warning",
+                f"⚠️ 模型已就位，但缺少运行库 PyTorch："
+                f"pip install torch\n模型文件夹：{directory}",
+            )
+        return "success", f"✅ 已就绪（{DEFAULT_VARIANT}）：{directory}"
+
+    def _refresh_redraw_section(self) -> None:
+        tone_name, sentence = self._redraw_status()
+        self.redraw_status.setText(sentence)
+        tone(self.redraw_status, tone_name)
+
+    def _on_external_redraw(self) -> None:
+        """Explain the external model and let the user point at one.
+
+        Deliberately a dialog rather than a silent jump to the settings panel:
+        the model is unusual enough (an optional ~190 MB download the installer
+        does not carry) that a user meeting this button needs the *why* as well
+        as the where.
+
+        ⚠️ **The button does not claim to redraw anything.** The workspace for
+        it is still a standalone tool, so the dialog says that plainly and
+        names the command. Offering an "开始重绘" button here would be the
+        placeholder problem this project has been burned by: a control that
+        looks like it runs the feature and does not.
+        """
+        lines = [
+            "线稿重绘用 Anime2Sketch（MIT）模型把原图**重新画一遍**，不是在图上"
+            "找边。细眉毛、链条、衣褶这些会被现有的填充读法糊成色块的地方，"
+            "它能画成一条线。",
+            "",
+            "模型不随软件分发：权重约 190 MB，而整个安装包才 178 MB；"
+            "纯 CPU 跑一次还要约 4.6 GB 内存，所以由你自己决定要不要装。",
+            "",
+            self._redraw_status()[1],
+        ]
+        if not self._redraw_ready():
+            lines += [
+                "",
+                "获取：python tools\\fetch_anime2sketch.py",
+                "也可以在下面的【选择模型文件夹…】里指向已经下载好的那一份。",
+            ]
+        else:
+            lines += [
+                "",
+                "用法：在【重绘线稿（探针）】窗口里选图、调两个滑块，"
+                "导出 PNG 后再用本窗口上传。",
+                "启动：python tools\\line_redraw_panel.py",
+            ]
+
+        box = QMessageBox(self)
+        box.setWindowTitle("线稿重绘（外接模型）")
+        box.setIcon(QMessageBox.Information)
+        box.setText("\n".join(lines).replace("**", ""))
+        pick = box.addButton("选择模型文件夹…", QMessageBox.ActionRole)
+        box.addButton("关闭", QMessageBox.RejectRole)
+        box.exec()
+
+        if box.clickedButton() is pick:
+            self._open_model_settings()
+
+    def _redraw_ready(self) -> bool:
+        from pcbart.model_paths import DEFAULT_VARIANT, check_model_dir, resolve_model_dir, torch_available
+
+        return (
+            check_model_dir(resolve_model_dir(), DEFAULT_VARIANT)["ok"]
+            and torch_available()
+        )
+
+    def _open_model_settings(self) -> None:
+        """Open 界面设置 at the model section of this panel's window."""
+        window = self.parentWidget() or self
+        while window is not None and not hasattr(window, "design_canvas"):
+            window = window.parentWidget()
+        if window is None:
+            return
+        panel = show_settings(window)
+        if panel is not None:
+            panel.focus_model_section()
 
     def _build_board_art_section(self) -> QGroupBox:
         """The 板画 controls, hidden unless that style is selected.
@@ -2352,7 +3072,7 @@ class PreprocessPanel(FloatingPanel):
             "白线 + 亮部走丝印，暗部 + 背景走铜。分界调低则白色更多。"
         )
         self.board_art_note.setWordWrap(True)
-        self.board_art_note.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        muted(self.board_art_note)
         layout.addWidget(self.board_art_note)
 
         box.setVisible(False)
@@ -2630,11 +3350,41 @@ class PreprocessPanel(FloatingPanel):
         if keys:
             board.layers.set_current(keys[0])
 
+        # ⚠️ A 板画 is two placements, and it is **one element** to whoever
+        # drew it -- the white tone on silkscreen and the black on copper are
+        # two halves of one picture. Grouping them here is what makes that true
+        # on the canvas and in the exported file: before this they were two
+        # rows in the layer list and two things to move, and keeping them
+        # registered was entirely on the user.
+        self._group_painting(board)
+
         # A picture that has already been processed must keep showing the line
         # art on its layer rather than falling back to the colour original.
         if self._inline_processed is not None:
             self._publish_line_art(self._inline_processed)
         canvas.update()
+
+    def _group_painting(self, board) -> None:
+        """Put this import's two board-painting tones into one named group.
+
+        Does nothing unless the import produced the pair: a single-tone import
+        -- a line drawing, a colour picture -- is one object, and
+        :meth:`ArtBoard.make_group` would refuse it anyway. The guard is
+        explicit so the intent is visible rather than resting on a rejection.
+
+        Named after the source file, because the group shows up in the layer
+        list and in the editor -- where 「组合 3」 says nothing about which
+        picture it is.
+        """
+        members = [
+            item
+            for item in board.placements
+            if self._belongs_to_import(item) and item.tone in ("white", "black")
+        ]
+        if len(members) < 2:
+            return
+        name = Path(self._source_path or "").stem or "板画"
+        board.make_group(members, name=name)
 
     def _latest_import_of_source(self, board):
         """The newest existing element made from the picture being imported.
@@ -2708,12 +3458,17 @@ class PreprocessPanel(FloatingPanel):
         self.process_check.setChecked(not detected)
         self.process_check.blockSignals(False)
 
-        # A softly shaded picture cannot be traced without blurring first: the
-        # dodge response is an edge detector, and across a smooth gradient it
-        # answers with hundreds of irregular rings instead of lines. Ticking
-        # 降噪 for such a picture is the same kind of suggestion as the
-        # two-colour switch above -- the checkbox stays live, so a user who
-        # wants the raw trace can simply untick it.
+        # A softly shaded picture traces better after a blur: all the
+        # per-pixel readings are edge detectors, and across a smooth gradient
+        # they answer with hundreds of irregular rings instead of lines.
+        #
+        # ⚠️ **It is offered, not applied.** This used to tick 降噪 by itself,
+        # and the user asked for the default to be off: an import that silently
+        # changes a processing switch makes the result hard to predict, and the
+        # smoothing it applies is visible in the line art. The note below says
+        # the picture would benefit and names the control; the user decides.
+        # The slider is still pre-sized to the recommended kernel so that
+        # ticking the box lands on a sensible value straight away.
         soft = not detected
         if soft:
             try:
@@ -2721,9 +3476,6 @@ class PreprocessPanel(FloatingPanel):
             except Exception:  # noqa: BLE001 - never block a load on a hint
                 soft = False
         if soft:
-            self.denoise_check.blockSignals(True)
-            self.denoise_check.setChecked(True)
-            self.denoise_check.blockSignals(False)
             # The slider's value means "pixels of the user's picture", so the
             # useful kernel is a fraction of the picture rather than a fixed
             # number: the same 5 px that cleans a 1400 px drawing does almost
@@ -2746,19 +3498,20 @@ class PreprocessPanel(FloatingPanel):
                 "检测到这张图只有两种颜色，已取消「处理图像」："
                 "图片会原样放到画板上。需要线稿或板画效果时，勾选上方开关即可。"
             )
-            self.process_note.setStyleSheet(f"color: {SUCCESS}; font-size: 11px;")
+            tone(self.process_note, "success")
         elif soft:
             self.process_note.setText(
-                "检测到这张图有柔和明暗渐变，已勾选「降噪」："
-                "渐变会让线稿切出很多碎圈，先模糊再提取才成线。"
-                "觉得细节损失太多可以取消勾选。"
+                "检测到这张图有柔和明暗渐变：渐变会让线稿切出很多碎圈，"
+                f"可以勾选「降噪」（已按这张图的大小预设为 "
+                f"{self.denoise_slider.value()}px）。默认不勾选，"
+                "保留原图细节。"
             )
-            self.process_note.setStyleSheet(f"color: {SUCCESS}; font-size: 11px;")
+            tone(self.process_note, "success")
         else:
             self.process_note.setText(
                 "图片会被处理后再放到画板上；取消勾选则原样放置。"
             )
-            self.process_note.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+            muted(self.process_note)
         self._refresh_layers()
 
     def _on_style_changed(self) -> None:
@@ -2892,6 +3645,15 @@ class PreprocessPanel(FloatingPanel):
         self._inline_processed = None
         self._full_processed = None
         self._published_digest = None
+        # ⚠️ A *fresh* cache, not ``None``. Setting it to None here turned the
+        # cache off for the rest of the session -- nothing recreates it -- and
+        # the symptom was exactly the lag the cache exists to remove: measured
+        # 900 ms per slider tick on a 1024 px picture instead of 100 ms. The
+        # cache is keyed on the picture's own bytes, so a new object is all that
+        # is needed to forget the previous file.
+        from pcbart.lineart import TraceCache
+
+        self._trace_cache = TraceCache()
         # A fresh upload starts a new, uncommitted import. Without this,
         # re-uploading the same file would look "already imported" and the
         # first press of 导入图片 would silently move the earlier element.
@@ -2929,13 +3691,13 @@ class PreprocessPanel(FloatingPanel):
             + ("　·　含透明通道" if alpha is not None else "")
         )
         self.source_note.setText(self._source_description)
-        self.source_note.setStyleSheet(f"color: {SUCCESS}; font-size: 11px;")
+        tone(self.source_note, "success")
         self.import_button.setEnabled(True)
         self.import_button.setToolTip("把当前的线稿按所选图层导入画布")
         self.import_note.setText(
             "参数调好后点上方按钮导入；未导入前画布不会变化。"
         )
-        self.import_note.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        muted(self.import_note)
         self._refresh_board_note()
         return True
 
@@ -3011,11 +3773,16 @@ class PreprocessPanel(FloatingPanel):
             self._refresh_board_note()
 
             canvas = main.design_canvas
+            # Same framing as the processed path: 处理图像 off means "do not
+            # trace it", not "ignore the card's opening". A two-colour drawing
+            # put on the card still has to land in the illustration window.
+            canvas.frame_into_card_region(canvas.selected)
+            canvas.record_external_change()
             canvas.fit_view()
             self.import_note.setText(
                 "已原样导入画布（未处理）；改参数前请先勾选「处理图像」。"
             )
-            self.import_note.setStyleSheet(f"color: {SUCCESS}; font-size: 11px;")
+            tone(self.import_note, "success")
             return True
 
         self._raw_snapped = False
@@ -3044,10 +3811,77 @@ class PreprocessPanel(FloatingPanel):
         self._refresh_board_note()
 
         canvas = main.design_canvas
+        # ⚠️ The card's illustration opening is applied here, on the import, and
+        # its absence was the reported defect: nothing in the panel ever called
+        # ``start_framing``, so a picture imported onto a 通行证 landed at its
+        # default size with no crop and neither writer clipped it. Doing it here
+        # rather than in each style is deliberate -- 线稿, 板画 and 彩色丝印 are
+        # three conversions of *one* placement, so framing once covers all three
+        # and the "which style was missed" class of bug cannot recur.
+        framed = canvas.frame_into_card_region(canvas.selected)
+        canvas.record_external_change()
         canvas.fit_view()
-        self.import_note.setText("已导入画布；改参数后再次点击会替换画布上的图。")
-        self.import_note.setStyleSheet(f"color: {SUCCESS}; font-size: 11px;")
+        if framed:
+            self.import_note.setText(
+                "已导入画布并放入立绘区；取景后再次点击会替换画布上的图。"
+            )
+        else:
+            self.import_note.setText("已导入画布；改参数后再次点击会替换画布上的图。")
+        tone(self.import_note, "success")
         return True
+
+    def _reading(self) -> str:
+        """The 读法 combo's key, not its display label."""
+        index = self.reading_combo.currentIndex()
+        if 0 <= index < len(READING_OPTIONS):
+            return READING_OPTIONS[index][0]
+        return READING_FILL
+
+    def reading_label(self) -> str:
+        """The selected reading's display label.
+
+        Callers that report *what ran* read the label from the same tuple the
+        combo is built from, so a reading can never be reported under another
+        one's name.
+        """
+        index = self.reading_combo.currentIndex()
+        if 0 <= index < len(READING_OPTIONS):
+            return READING_OPTIONS[index][1]
+        return READING_OPTIONS[0][1]
+
+    def _on_reading_changed(self) -> None:
+        """The reading moved: show only the controls that reading uses.
+
+        A slider the current reading ignores is worse than a missing one -- the
+        panel has already been reported twice for controls that looked live and
+        did nothing. 线条粗细 and 墨量阈值 are read by 纯线条 (``mode="dodge"``)
+        and by nothing else, so only there are they shown.
+        """
+        self._refresh_reading_rows()
+        self._on_tuning_changed()
+
+    def _refresh_reading_rows(self) -> None:
+        """Show the controls that belong to the selected reading.
+
+        线条粗细 and 墨量阈值 are read by ``mode="dodge"`` and by nothing else:
+        填充色块 takes its split from Otsu and 描边+填充 from the contour
+        density, so in those two readings the sliders would move without
+        changing a single pixel. That is the exact defect this panel has been
+        reported for before -- a control that looks live and does nothing --
+        so they are hidden instead of merely documented.
+        """
+        reading = self._reading()
+        for widget in (
+            self.outline_width_row,
+            self.outline_detail_row,
+            self.outline_density_row,
+        ):
+            widget.setVisible(reading == READING_OUTLINE)
+        for widget in (self.strength_row, self.threshold_row):
+            widget.setVisible(reading == READING_DODGE)
+        index = self.reading_combo.currentIndex()
+        if 0 <= index < len(READING_OPTIONS):
+            self.reading_note.setText(READING_OPTIONS[index][2])
 
     def _lineart_params(self, param_scale: float = 1.0):
         """Line-extraction settings only.
@@ -3062,6 +3896,7 @@ class PreprocessPanel(FloatingPanel):
         from pcbart.work_scale import scaled_param
 
         return LineArtParams(
+            mode=self._reading(),
             strength=self.strength_slider.value() / 100.0,
             threshold=self.threshold_slider.value() / 100.0,
             silhouette=self.silhouette_check.isChecked(),
@@ -3075,7 +3910,27 @@ class PreprocessPanel(FloatingPanel):
                     )
                 ),
             ),
+            # 描边密度 is a share of the subject, so it is resolution-independent
+            # too and is *not* scaled. 描边线宽 is in millimetres of the
+            # finished board, and :func:`line_art` turns it into pixels with
+            # ``px_per_mm``.
+            outline_sigma_ratio=self.outline_detail_slider.value() / 10000.0,
+            outline_density=self.outline_density_slider.value() / 1000.0,
+            outline_width_mm=self.outline_width_slider.value() / 100.0,
         )
+
+    def _px_per_mm(self, image) -> float | None:
+        """How many traced pixels make a millimetre on the finished board.
+
+        The contour's width is specified in millimetres, so something has to
+        connect the two -- and it is the *board's* size, not the source's.
+        Uses the same placement width the 板画 conversion does, so the two
+        styles agree about how big the picture will be.
+        """
+        width_mm = self._placement_width_mm()
+        if width_mm <= 0 or image is None or image.shape[1] <= 0:
+            return None
+        return image.shape[1] / width_mm
 
     def _board_art_params(self, param_scale: float = 1.0) -> BoardArtParams:
         """The 板画 controls as model parameters.
@@ -3162,7 +4017,7 @@ class PreprocessPanel(FloatingPanel):
             )
 
         from pcbart.denoise import clean_binary, denoise_image
-        from pcbart.lineart import line_art, line_art_preview
+        from pcbart.lineart import clean_strokes_with_arcs, line_art, line_art_preview
         from pcbart.work_scale import scaled_param
 
         # 降噪核、轮廓宽度、去杂点面积都是「用户那张图」的像素数。降采样之后
@@ -3183,11 +4038,26 @@ class PreprocessPanel(FloatingPanel):
             ),
         )
         params = self._lineart_params(param_scale)
+        # The cache is keyed on the blurred plane, so changing 降噪 (or the
+        # source) invalidates it on its own and 抠图 stays consistent with the
+        # picture actually being traced. Nothing here has to remember to clear
+        # it except a change of source, which swaps the whole panel state.
+        cache = self._trace_cache
+        px_per_mm = self._px_per_mm(image)
         if max_side is None:
-            traced = line_art(blurred, alpha, params)
+            traced = line_art(
+                blurred, alpha, params, trace_cache=cache, px_per_mm=px_per_mm
+            )
         else:
-            traced = line_art_preview(blurred, alpha, params, max_side=max_side)
-        return clean_binary(
+            traced = line_art_preview(
+                blurred,
+                alpha,
+                params,
+                max_side=max_side,
+                trace_cache=cache,
+                px_per_mm=px_per_mm,
+            )
+        traced = clean_binary(
             traced,
             min_blob_area=int(
                 round(
@@ -3197,6 +4067,18 @@ class PreprocessPanel(FloatingPanel):
                 )
             ),
         )
+        if self.arc_smooth_check.isChecked() and max_side is None:
+            # ⚠️ **Deliberately not run for the live preview.** Measured at
+            # **1.8 s** on a 1024 px picture against 36 ms for the rest of the
+            # pass, so running it per slider tick would reintroduce exactly the
+            # 调参卡顿 this panel was just fixed for. The preview tracks the
+            # sliders at display resolution and this runs on the settled
+            # full-resolution conversion, which is the arrangement the earlier
+            # VTracer measurement recommended and the same one the 260 ms
+            # commit timer already provides. The switch therefore costs one
+            # pause after a drag, not a pause per step.
+            traced = clean_strokes_with_arcs(traced, px_per_mm=px_per_mm or 1.0)
+        return traced
 
     def _board_art_px_per_mm(self, image) -> float | None:
         """The resolution the painting will print at.
@@ -3270,7 +4152,7 @@ class PreprocessPanel(FloatingPanel):
                     )
             except Exception as exc:  # noqa: BLE001 - surfaced to the user
                 self.tune_note.setText(f"图片读取失败：{exc}")
-                self.tune_note.setStyleSheet(f"color: {DANGER}; font-size: 11px;")
+                tone(self.tune_note, "danger")
                 return
             self._inline_processed = processed
             self._show_in_drop_zone(processed, None, processed.shape[1], processed.shape[0], 0.0)
@@ -3292,7 +4174,7 @@ class PreprocessPanel(FloatingPanel):
 
             traceback.print_exc()
             self.tune_note.setText(f"处理失败：{exc}")
-            self.tune_note.setStyleSheet(f"color: {DANGER}; font-size: 11px;")
+            tone(self.tune_note, "danger")
             return
         elapsed_ms = (time.perf_counter() - start) * 1000.0
 
@@ -3329,14 +4211,32 @@ class PreprocessPanel(FloatingPanel):
             )
             if self.despeckle_slider.value():
                 denoise_state += f" · 去杂点 {self.despeckle_slider.value()}px"
+            if self.arc_smooth_check.isChecked():
+                denoise_state += " · 弧线平滑"
+
+            # The reading that produced this preview is named *here*, from the
+            # same tuple the combo is built from. Spelling it out per branch
+            # meant a new reading silently reported itself as 填充色块.
+            reading_state = f"读法 {self.reading_label()}　·　"
+            if self._reading() == READING_OUTLINE:
+                reading_state += (
+                    f"线宽 {self.outline_width_slider.value() / 100:.2f} mm　·　"
+                    f"密度 {self.outline_density_slider.value() / 10:.1f}%　·　"
+                )
+            elif self._reading() == READING_DODGE:
+                # The two controls 纯线条 actually reads. Reporting them under
+                # 填充色块 would name numbers that changed nothing.
+                reading_state += (
+                    f"粗细 {self.strength_slider.value() / 100:.2f}　·　"
+                    f"阈值 {self.threshold_slider.value() / 100:.2f}　·　"
+                )
 
             self.tune_note.setText(
-                f"粗细 {self.strength_slider.value() / 100:.2f}　·　"
-                f"阈值 {self.threshold_slider.value() / 100:.2f}　·　"
+                f"{reading_state}"
                 f"{denoise_state}　·　"
                 f"墨量 {ink:.1f}%　·　{elapsed_ms:.0f} ms"
             )
-        self.tune_note.setStyleSheet(f"color: {SUCCESS}; font-size: 11px;")
+        tone(self.tune_note, "success")
 
         # Show the bounded result on the canvas too, so the layer preview
         # tracks the sliders instead of only updating when 大图预览 is opened.
@@ -3391,7 +4291,7 @@ class PreprocessPanel(FloatingPanel):
             )
         except Exception as exc:  # noqa: BLE001 - surfaced, not hidden
             self.tune_note.setText(f"线稿写入失败：{exc}")
-            self.tune_note.setStyleSheet(f"color: {DANGER}; font-size: 11px;")
+            tone(self.tune_note, "danger")
             return
 
         self._full_processed = processed
@@ -3516,6 +4416,7 @@ class PreprocessPanel(FloatingPanel):
             if not self._raw_snapped:
                 for placement in targets:
                     placement.processed_path = ""
+                    placement.kind = ""
                 canvas._tinted_cache.clear()
                 canvas.update()
                 return True
@@ -3523,6 +4424,7 @@ class PreprocessPanel(FloatingPanel):
         if self._committed_style == COLOR_STYLE:
             for placement in targets:
                 placement.processed_path = ""
+                placement.kind = ""
             canvas._tinted_cache.clear()
             canvas.update()
             return True
@@ -3530,7 +4432,7 @@ class PreprocessPanel(FloatingPanel):
         if self._committed_style == BOARD_ART_STYLE:
             return self._publish_board_art(processed, targets, canvas)
 
-        # Skip the rewrite when the pixels have not changed, which is most
+        # Skip the rewrite when the pixels have not changed, which is most of
         # slider ticks. Everything below this line invalidates canvas caches
         # and touches the disk, so doing it needlessly makes dragging stutter.
         digest = hashlib.sha1(np.ascontiguousarray(processed).tobytes()).hexdigest()
@@ -3541,15 +4443,29 @@ class PreprocessPanel(FloatingPanel):
             from pcbart.image_prep import imwrite_unicode
 
             try:
+                # ⚠️ **Written black-on-white, and that is what the canvas
+                # needs.** ``design_canvas._tinted`` turns the file into the
+                # layer's colour by reading it as *grey*: ink is dark, so it
+                # uses ``255 - grey`` as the alpha. An ink-on-transparent file
+                # has paper at RGB 0, which reads as grey 0 -- maximum ink --
+                # and the whole illustration came out as one solid block of the
+                # layer colour. The transparent form is produced at export
+                # time instead, by ``pcbart.color_image``, where it is needed
+                # so the white paper is not printed onto the card.
                 imwrite_unicode(target, processed)
             except Exception as exc:  # noqa: BLE001 - surfaced, not hidden
                 self.tune_note.setText(f"线稿写入失败：{exc}")
-                self.tune_note.setStyleSheet(f"color: {DANGER}; font-size: 11px;")
+                tone(self.tune_note, "danger")
                 return False
             self._published_digest = digest
 
         for placement in targets:
             placement.processed_path = target
+            # The kind records that this file is 线稿's own output, so the
+            # writer embeds it as a picture instead of tracing it back into
+            # filled regions the user cannot edit. See
+            # :func:`pcbart.color_image.is_color_artwork`.
+            placement.kind = "lineart"
 
         canvas._pixmaps.pop(target, None)
         canvas._tinted_cache.clear()
@@ -3590,9 +4506,7 @@ class PreprocessPanel(FloatingPanel):
                     imwrite_unicode(target, image)
                 except Exception as exc:  # noqa: BLE001 - surfaced, not hidden
                     self.tune_note.setText(f"板画写入失败：{exc}")
-                    self.tune_note.setStyleSheet(
-                        f"color: {DANGER}; font-size: 11px;"
-                    )
+                    tone(self.tune_note, "danger")
                     return False
                 self._published_digests[target] = digest
 
@@ -3630,7 +4544,27 @@ class PreprocessPanel(FloatingPanel):
         return str(root / f"{stem}_{digest}{tail}.png")
 
     def _on_tuning_changed(self) -> None:
-        self._refresh_preview()
+        """A tuning control moved: recompute the preview, coalescing bursts.
+
+        The debounce is what keeps a drag responsive. Every step of the handle
+        emits its own value, and a conversion is long enough that computing each
+        one queues work faster than it drains -- the picture on screen then
+        falls further and further behind the handle. Restarting a short
+        single-shot timer per step means only the value the user stopped on is
+        converted, while a single click still updates immediately.
+
+        The timer is created lazily because it needs a live ``self`` as its
+        parent, and clearing a slider's value during construction would
+        otherwise start one before the panel has finished building.
+        """
+        timer = self._preview_timer
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(PREVIEW_DEBOUNCE_MS)
+            timer.timeout.connect(self._refresh_preview)
+            self._preview_timer = timer
+        timer.start()
 
     def _reset_tuning(self) -> None:
         """Restore every style's defaults, including the ones not on screen.
@@ -3645,6 +4579,9 @@ class PreprocessPanel(FloatingPanel):
             self.denoise_slider,
             self.despeckle_slider,
             self.silhouette_slider,
+            self.outline_width_slider,
+            self.outline_detail_slider,
+            self.outline_density_slider,
             self.tone_slider,
             self.outline_mm_slider,
             self.min_feature_slider,
@@ -3656,6 +4593,9 @@ class PreprocessPanel(FloatingPanel):
         self.denoise_slider.setValue(5)
         self.despeckle_slider.setValue(0)
         self.silhouette_slider.setValue(5)
+        self.outline_width_slider.setValue(20)
+        self.outline_detail_slider.setValue(16)
+        self.outline_density_slider.setValue(60)
         self.tone_slider.setValue(int(TONE_THRESHOLD * 100))
         self.outline_mm_slider.setValue(46)
         self.min_feature_slider.setValue(10)
@@ -3664,7 +4604,8 @@ class PreprocessPanel(FloatingPanel):
 
         for check, value in (
             (self.denoise_check, False),
-            (self.silhouette_check, True),
+            (self.silhouette_check, False),
+            (self.arc_smooth_check, False),
             (self.background_check, True),
             (self.flip_vertical_check, False),
             (self.flip_horizontal_check, False),
@@ -3674,7 +4615,13 @@ class PreprocessPanel(FloatingPanel):
             check.setChecked(value)
             check.blockSignals(False)
 
+        self.reading_combo.blockSignals(True)
+        self.reading_combo.setCurrentIndex(0)
+        self.reading_combo.blockSignals(False)
+        self._refresh_reading_rows()
+
         self._refresh_preview()
+        self._repaint_now()
 
     def _side(self) -> str:
         return "顶层" if self.side_control.buttons[0].isChecked() else "底层"  # type: ignore[attr-defined]
@@ -3701,6 +4648,7 @@ class PreprocessPanel(FloatingPanel):
                 self.tuning_section,
                 self.denoise_section,
                 self.preview_section,
+                self.redraw_section,
             ):
                 widget.setVisible(False)
             self.process_note.setText("图片将原样放到画板上，不做任何处理。")
@@ -3721,6 +4669,21 @@ class PreprocessPanel(FloatingPanel):
         self.tuning_section.setVisible(not painting and not locked)
         self.denoise_section.setVisible(not painting and not locked)
         self.preview_section.setVisible(not locked)
+
+        # 线稿重绘 is the third way to turn a picture into line art, so it
+        # belongs wherever the built-in line-art reading does -- and *not* under
+        # 彩色丝印, which processes nothing. Its status is re-read here because
+        # the model folder or PyTorch can have been installed since the panel
+        # was built, and a stale "尚未安装" would be a lie the user cannot
+        # refresh.
+        self.redraw_section.setVisible(not painting and not locked)
+        if not painting and not locked:
+            self._refresh_redraw_section()
+        if not painting and not locked:
+            # Which of 线稿调试's rows are live depends on the reading, and a
+            # style change is a common way to arrive at this panel -- so the
+            # rows are reconciled here rather than only when the combo moves.
+            self._refresh_reading_rows()
 
         # 板画 replaces the layer list with its own three-way choice. The
         # side control above is *not* used then: "both" is a side choice of its
@@ -3790,7 +4753,71 @@ class PreprocessPanel(FloatingPanel):
             self.layer_note.setText("保留原图配色，画布显示彩色原图；不做线稿处理")
             return
         options = {label: hint for label, _keys, hint in layer_options(side)}
-        self.layer_note.setText(options.get(self.layer_combo.currentText(), ""))
+        hint = options.get(self.layer_combo.currentText(), "")
+        # Line art can leave the tool as a picture, but only on a silkscreen
+        # layer: the EDA's embedded-object API accepts no other layer, and a
+        # request for copper is silently answered with silkscreen. Rather than
+        # let that surprise someone, say which of the choices keeps the pixels.
+        if self._style() == "线稿":
+            keys = self._presentation_keys()
+            if keys and all(key.endswith("_silk") for key in keys):
+                hint += "；线稿会作为黑白图片放入，细节按原图保留"
+            elif keys and not any(key.endswith("_silk") for key in keys):
+                hint += "；铜层只能放填充图形，想要图片请选丝印层"
+        self.layer_note.setText(hint)
+
+
+def live_panel(name: str):
+    """The cached panel in ``name``, or ``None`` if it is unusable.
+
+    ⚠️ **Reading the module global is itself the dangerous step.** A panel is
+    parented to a window, so it dies with that window -- and the global keeps a
+    Python wrapper whose C++ half is gone. Touching that wrapper (reading an
+    attribute, comparing it, *printing it*) raises ``RuntimeError``, so a guard
+    written as ``if panel is not None and panel.parentWidget() ...`` is already
+    too late: the first part is what throws.
+
+    Every reader of one of the panel globals goes through here, which is the
+    only way a caller can be sure it is holding a live object.
+    """
+    module = sys.modules[__name__]
+    try:
+        panel = getattr(module, name, None)
+    except RuntimeError:
+        setattr(module, name, None)
+        return None
+    return panel
+
+
+def reusable_panel(panel, main_window, factory):
+    """Return ``panel`` if it is still usable for ``main_window``, else a new one.
+
+    Three things have to be true for a cached panel to be usable, and asking
+    them in this order is what makes the check safe:
+
+    1. **It is not dead.** A parented Qt object lives exactly as long as the
+       window that owns it, and when that window is destroyed the module global
+       keeps a Python wrapper whose C++ half is gone. *Touching that wrapper --
+       reading an attribute, printing it, even ``is None`` on the object rather
+       than the name -- raises ``RuntimeError``.* So the liveness check has to
+       come first, and it is done by attempting the call and catching that
+       error rather than by inspecting anything.
+    2. It is parented to the window being asked about, not to a previous one.
+    3. It is still in that window's child list.
+
+    Returned as ``(panel, created)``. Extracted from the three ``show_*``
+    functions because they all had the same latent crash and only one of them
+    happened to avoid it in practice.
+    """
+    if panel is not None:
+        try:
+            if panel.parentWidget() is main_window:
+                return panel, False
+        except RuntimeError:
+            # The C++ object is gone; fall through and build a fresh one.
+            pass
+    made = factory(main_window)
+    return made, True
 
 
 def show_preprocess(main_window: QWidget) -> PreprocessPanel:
@@ -3800,8 +4827,10 @@ def show_preprocess(main_window: QWidget) -> PreprocessPanel:
     opened from the desktop or appear in the taskbar.
     """
     global _preprocess_panel
-    if _preprocess_panel is None or _preprocess_panel.parentWidget() is not main_window:
-        _preprocess_panel = PreprocessPanel(main_window)
+    _preprocess_panel, created = reusable_panel(
+        _preprocess_panel, main_window, PreprocessPanel
+    )
+    if created:
         _preprocess_panel.resize(420, 560)
         _preprocess_panel.place_top_right()
     _preprocess_panel.show()
@@ -3837,13 +4866,31 @@ class BoardSetupPanel(FloatingPanel):
     changed = Signal()
     """Emitted after an edit, so the canvas and the inspector can refresh."""
 
+    content_requested = Signal()
+    """Emitted when the user asks for the template-content panel.
+
+    A signal rather than the panel opening itself: the board-setup panel has no
+    business knowing where that panel lives or how it is parented, and the
+    window is the one that owns the connection.
+    """
+
     TEMPLATE_OPTION = "套用模板"
 
-    def __init__(self, parent: QWidget, board: ArtBoard) -> None:
+    def __init__(self, parent: QWidget, board: ArtBoard, canvas=None) -> None:
         super().__init__(parent, "板框设置")
         self.resize(400, 620)
         self._board = board
+        self.canvas = canvas
+        """The design canvas, so a template change can re-crop the pictures.
+
+        Optional because the panel is also built in tests and scripts that only
+        want the controls; when it is missing the reframing is simply skipped,
+        which is the same behaviour as a board that is not a card.
+        """
         self._updating = False
+        self._run_key: str | None = None
+        """Which run of edits the last change belonged to; see
+        :meth:`edit_run_key`."""
 
         # Opening the panel is the decision to have a board, so a first board
         # is seeded from the artwork and goes live immediately. A board the
@@ -3860,7 +4907,7 @@ class BoardSetupPanel(FloatingPanel):
             "图片也可在画布上直接拖动。"
         )
         intro.setWordWrap(True)
-        intro.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        muted(intro)
         layout.addWidget(intro)
 
         shape_group = section("1 · 板框形状", compact=True)
@@ -3876,6 +4923,24 @@ class BoardSetupPanel(FloatingPanel):
         names = template_names()
         self.template_combo = combo(names or ["尚未载入模板"])
         self.template_combo.setEnabled(bool(names))
+        # Spell out what each entry is for. The bare name says nothing about
+        # which layout it is, and the two are not interchangeable: the short
+        # card carries the 阵营 logo block and the tall one a full-height
+        # illustration window, so picking the wrong one prints the wrong card.
+        for stage, description in badge_card.STAGES:
+            index = self.template_combo.findText(badge_card.template_name(stage))
+            if index >= 0:
+                self.template_combo.setItemData(
+                    index, f"{badge_card.template_name(stage)}　·　{description}",
+                    Qt.ToolTipRole,
+                )
+        if names:
+            self.template_combo.setToolTip(
+                "\n".join(
+                    f"{badge_card.template_name(stage)}：{description}"
+                    for stage, description in badge_card.STAGES
+                )
+            )
         if not names:
             # A disabled entry rather than one that can be picked but leads
             # nowhere: the template files have not been supplied yet.
@@ -3886,6 +4951,17 @@ class BoardSetupPanel(FloatingPanel):
         self.template_combo.currentIndexChanged.connect(self._on_template_changed)
         self.template_row = row("模板", self.template_combo)
         shape_layout.addWidget(self.template_row)
+
+        # The way in to the card's wording and its lanyard slot. It sits here,
+        # directly under the template picker, because this is where the user
+        # already is when they choose 通行证 -- a menu entry somewhere else is
+        # a feature they have to be told about, and the first version of this
+        # put it in 文件 and left it disabled until a card existed, so it read
+        # as a control that had not been built.
+        self.content_button = QPushButton("编辑模板内容…")
+        self.content_button.setMinimumHeight(26)
+        self.content_button.clicked.connect(self.content_requested.emit)
+        shape_layout.addWidget(self.content_button)
 
         # Irregular settings live inside the shape section rather than in a
         # panel of their own: "how the artwork combines with a shape" is part
@@ -3992,7 +5068,7 @@ class BoardSetupPanel(FloatingPanel):
 
         self.standee_note = QLabel()
         self.standee_note.setWordWrap(True)
-        self.standee_note.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        muted(self.standee_note)
         standee_layout.addWidget(self.standee_note)
         size_layout.addWidget(self.standee_group)
         layout.addWidget(size_group)
@@ -4020,7 +5096,7 @@ class BoardSetupPanel(FloatingPanel):
 
         self.image_note = QLabel()
         self.image_note.setWordWrap(True)
-        self.image_note.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        muted(self.image_note)
         image_layout.addWidget(self.image_note)
         self.image_group = image_group
         layout.addWidget(image_group)
@@ -4260,6 +5336,12 @@ class BoardSetupPanel(FloatingPanel):
                 self._board.outline.after_shape_change(shape, artwork),
                 template=None,
             )
+            # A circle is not a card. Leaving the wording and the slot behind
+            # would have the content panel offering to edit lines the board no
+            # longer draws, and the slot would still be cut out of a round
+            # board nobody asked to perforate.
+            self._board.texts = []
+            self._board.cutouts = []
             if shape == OutlineShape.IRREGULAR:
                 # The base's own settings only exist for this shape, and a
                 # board that was never irregular has no meaningful ratio yet.
@@ -4279,13 +5361,75 @@ class BoardSetupPanel(FloatingPanel):
         self._apply()
 
     def _apply_selected_template(self) -> None:
-        """Adopt the chosen template's shape and dimensions."""
+        """Adopt the chosen template's shape, dimensions **and content**.
+
+        Content too, at the user's request: the cards are mostly wording, and a
+        blank template that arrived as a bare outline would send the user back
+        to the EDA for the one thing this tool exists to do. Applying it twice
+        is harmless -- the content is replaced wholesale from the template
+        rather than merged, so re-picking 通行证 on a card whose text was
+        mangled restores the template's own wording.
+
+        ⚠️ **The template also decides where the imported pictures are cropped.**
+        The user's instruction is that choosing 精0 or 精2 must not leave them
+        right-clicking 放入短区／长区: the layout already says which opening it
+        has. The reframing therefore happens here, at the one place that knows
+        the template changed, rather than at each import -- which matters when
+        the picture arrived *before* the card did, the path that used to leave
+        it unframed at its default 76.2 mm.
+        """
         if not template_names():
             return
+        name = self.template_combo.currentText()
+        # The layout in force *before* this call decides whether the pictures
+        # need moving. Re-picking the card the board already has is how the
+        # panel restores mangled wording, and it is also what happens if the
+        # user simply walks back into this panel -- neither is a request to
+        # redo a crop they may have adjusted by hand.
+        previous = self._board.outline.template or ""
         try:
-            self._board.outline = build_template(self.template_combo.currentText())
+            self._board.outline = build_template(name)
         except KeyError:
             return
+        if badge_card.is_badge_template(name):
+            # ---- content
+            #
+            # The user's own edits are replaced, which is what makes re-picking
+            # the template a way back to a known state. The chosen operator is
+            # kept: it is not part of the template but of *this card*, and
+            # dropping it would blank the name every time the shape was
+            # re-selected.
+            self._board.texts = badge_card.badge_texts()
+            self._board.cutouts = badge_card.badge_cutouts()
+
+        # A layout change moves the opening, so every picture the user brought
+        # has to be re-framed for the new one -- including one that was imported
+        # before the card existed, which is the 「还要右键取景」 path. Pictures
+        # that have never been framed at all are caught by the same call, so a
+        # card whose artwork arrived first still ends up cropped.
+        self._reframe_card_illustrations(layout_changed=previous != name)
+
+    def _reframe_card_illustrations(self, *, layout_changed: bool = True) -> int:
+        """Re-crop the card's imported pictures for the template now applied.
+
+        The canvas owns the geometry and the history, so this only asks it and
+        reports what came back. A board that is not a card, or a template that
+        is not 通行证, leaves everything untouched.
+
+        ``layout_changed`` false means the same card is being re-applied, so
+        only pictures that have never been framed are picked up. A picture the
+        user deliberately put in the other opening by hand keeps it -- the
+        template decides the crop, but it does not overrule a direct choice.
+
+        No separate history entry is recorded here: the canvas records each
+        reframing under one run key, and the template swap itself is recorded by
+        the panel's own ``changed`` signal. Adding a third recording would only
+        push an identical snapshot.
+        """
+        canvas = getattr(self, "canvas", None)
+        if canvas is None:
+            return 0
+        return canvas.frame_illustrations_for_card(reframe=layout_changed)
 
     def _on_board_size_changed(self) -> None:
         if self._updating:
@@ -4364,13 +5508,11 @@ class BoardSetupPanel(FloatingPanel):
         self.standee_x_slider.setEnabled(travel > 0.05)
         if error:
             self.standee_note.setText(f"⚠ {error}")
-            self.standee_note.setStyleSheet(
-                f"color: {WARNING}; font-size: 11px;"
-            )
+            tone(self.standee_note, "warning")
             return
         contact = self._board.standee_contact_mm()
         width = self._board.outline.standee_width_mm
-        self.standee_note.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        muted(self.standee_note)
         if travel > 0.05:
             self.standee_note.setText(f"沿下边缘可左右移动 ±{travel:.1f} mm")
             return
@@ -4462,7 +5604,28 @@ class BoardSetupPanel(FloatingPanel):
     def _apply(self) -> None:
         self._board.outline_ready = True
         self._refresh_status()
+        self._run_key = self._field_key()
         self.changed.emit()
+
+    def _field_key(self) -> str:
+        """Which control produced the current board edit, for undo coalescing.
+
+        Same idea as the image property pane's key: dragging the board width
+        spinner is one undo step, not one per increment. When nothing can be
+        identified the key falls back to the panel itself, which still merges a
+        continuous run rather than pushing a step per motion event.
+        """
+        sender = self.sender()
+        field = "board"
+        for name, value in vars(self).items():
+            if value is sender:
+                field = name
+                break
+        return f"board:{field}"
+
+    def edit_run_key(self) -> str | None:
+        """The run key for the edit just reported."""
+        return self._run_key
 
     def _refresh_status(self) -> None:
         """Describe the board the canvas is now showing."""
@@ -4470,10 +5633,7 @@ class BoardSetupPanel(FloatingPanel):
         problems = spec.validate()
         if problems:
             self.status_label.setText("⚠ " + "；".join(problems))
-            self.status_label.setStyleSheet(
-                f"background: #fff8e6; color: {WARNING}; border: 1px solid #f0d9a8;"
-                f"border-radius: 4px; padding: 6px 8px; font-size: 11px;"
-            )
+            warn_surface(self.status_label, size=11, padding="6px 8px")
             return
 
         label = OutlineShape.LABELS.get(spec.shape, spec.shape)
@@ -4523,17 +5683,516 @@ class BoardSetupPanel(FloatingPanel):
         error = self._board._irregular_error
         if spec.shape == OutlineShape.IRREGULAR and error:
             text += f"\n⚠ 描边失败：{error}"
-            self.status_label.setStyleSheet(
-                f"background: #fff8e6; color: {WARNING}; border: 1px solid #f0d9a8;"
-                f"border-radius: 4px; padding: 6px 8px; font-size: 11px;"
-            )
+            warn_surface(self.status_label, size=11, padding="6px 8px")
             self.status_label.setText(text)
             return
         self.status_label.setText(text)
-        self.status_label.setStyleSheet(
-            f"background: {PANEL_BG}; border: 1px solid {BORDER};"
-            f"border-radius: 4px; padding: 6px 8px; font-size: 11px;"
+        info_surface(self.status_label)
+
+
+class ColourSwatch(QPushButton):
+    """One clickable colour chip in the preset row.
+
+    Drawn as a filled rounded square rather than a labelled button because the
+    choice *is* the colour: a row of names would make the user read sixteen
+    words to find the one they can already see.
+    """
+
+    SIZE = 34
+
+    def __init__(self, name: str, colour: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.colour = colour
+        self.name = name
+        self.setFixedSize(self.SIZE, self.SIZE)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip(f"{name}　{colour}")
+        self._selected = False
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def set_selected(self, value: bool) -> None:
+        if self._selected != value:
+            self._selected = value
+            self.update()
+
+    def is_selected(self) -> bool:
+        return self._selected
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        rect = QRectF(3, 3, self.width() - 6, self.height() - 6)
+
+        painter.setBrush(QColor(self.colour))
+        # The hairline keeps a white swatch visible against a white panel; the
+        # double ring below is what marks the current choice, so this one must
+        # stay subtle or every swatch looks selected.
+        painter.setPen(QPen(QColor(0, 0, 0, 40), 1))
+        painter.drawRoundedRect(rect, 9, 9)
+
+        if self._selected:
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(QColor(TEXT), 2))
+            painter.drawRoundedRect(rect.adjusted(-2, -2, 2, 2), 11, 11)
+
+        if self.hasFocus():
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(QColor(ACCENT), 2, Qt.DotLine))
+            painter.drawRoundedRect(rect.adjusted(-4.5, -4.5, 4.5, 4.5), 12, 12)
+
+
+class ThemeSettingsPanel(FloatingPanel):
+    """The colour settings: presets, light/dark, and a full custom editor.
+
+    Every change applies immediately. There is no OK button on purpose -- the
+    whole point of picking a colour is seeing it, and a dialog that has to be
+    dismissed before the change is visible turns choosing into guesswork. The
+    change is saved as it is made, so a crash or a forced close cannot lose it.
+    """
+
+    #: Wide enough for six colour chips plus their gaps. Narrower and the grid
+    #: clips; wider and the labels and colour values drift apart.
+    WIDTH = 440
+
+    def __init__(self, parent: QWidget, scheme) -> None:
+        super().__init__(parent, "界面设置", width=self.WIDTH)
+        self._scheme = scheme
+        self._updating = False
+        self._swatches: list[ColourSwatch] = []
+
+        layout = self.content_layout
+
+        intro = QLabel(
+            "界面配色由**一个颜色**推出来：选一个主色，面板、文字、按钮"
+            "会自动配好。想逐个调就在下面展开【高级】。"
         )
+        intro.setWordWrap(True)
+        muted(intro)
+        intro.setTextFormat(Qt.MarkdownText)
+        layout.addWidget(intro)
+
+        # ------------------------------------------------------- presets
+        preset_group = section("1 · 主题色", compact=True)
+        preset_layout = QVBoxLayout(preset_group)
+        preset_layout.setContentsMargins(0, 0, 0, 0)
+        preset_layout.setSpacing(6)
+
+        from pcbart.ui_theme import PRESETS
+
+        # Six per row rather than nine: seventeen presets in a nine-wide grid
+        # leave a ragged half-empty row, while six gives three tidy rows. The
+        # panel is also narrow enough that nine columns makes each chip small
+        # enough to be fiddly to hit.
+        columns = 6
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(8)
+        for index, (name, colour) in enumerate(PRESETS):
+            swatch = ColourSwatch(name, colour)
+            swatch.clicked.connect(
+                lambda _=False, c=colour: self._choose_seed(c)
+            )
+            self._swatches.append(swatch)
+            grid.addWidget(swatch, index // columns, index % columns)
+        # Keep the chips left-aligned when the last row is short, instead of
+        # letting Qt spread them across the whole width.
+        for column in range(columns):
+            grid.setColumnStretch(column, 0)
+        grid.setColumnStretch(columns, 1)
+        preset_layout.addLayout(grid)
+
+        self.preset_note = QLabel()
+        self.preset_note.setWordWrap(True)
+        muted(self.preset_note)
+        preset_layout.addWidget(self.preset_note)
+        layout.addWidget(preset_group)
+
+        # ---------------------------------------------------- light/dark
+        mode_group = section("2 · 明暗", compact=True)
+        mode_layout = QVBoxLayout(mode_group)
+        mode_layout.setContentsMargins(0, 0, 0, 0)
+        mode_layout.setSpacing(4)
+        self.mode_combo = combo(["浅色", "深色"])
+        self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+        mode_layout.addWidget(row("外观", self.mode_combo))
+        self.mode_note = QLabel()
+        self.mode_note.setWordWrap(True)
+        muted(self.mode_note)
+        mode_layout.addWidget(self.mode_note)
+        layout.addWidget(mode_group)
+
+        # ----------------------------------------------------- advanced
+        self.advanced_button = QPushButton("高级：逐个调整颜色")
+        self.advanced_button.setCheckable(True)
+        self.advanced_button.setIcon(qt_theme_icon("custom", MUTED, size=18))
+        self.advanced_button.toggled.connect(self._on_advanced_toggled)
+        layout.addWidget(self.advanced_button)
+
+        self.advanced_group = section("3 · 高级", compact=True)
+        advanced_layout = QVBoxLayout(self.advanced_group)
+        advanced_layout.setContentsMargins(0, 0, 0, 0)
+        advanced_layout.setSpacing(4)
+
+        advanced_note = QLabel(
+            "下面每个颜色都可以单独改。改过的颜色不会再跟着主色走，"
+            "【重置为预设】可以放回自动配色。"
+        )
+        advanced_note.setWordWrap(True)
+        muted(advanced_note)
+        advanced_layout.addWidget(advanced_note)
+
+        from pcbart.ui_theme import ROLE_LABELS
+
+        self._role_buttons: dict[str, QPushButton] = {}
+        for role, label in ROLE_LABELS:
+            button = QPushButton()
+            button.setFixedSize(58, 26)
+            button.setCursor(Qt.PointingHandCursor)
+            button.clicked.connect(lambda _=False, r=role: self._edit_role(r))
+            self._role_buttons[role] = button
+            advanced_layout.addWidget(colour_row(label, button))
+
+        self.reset_button = QPushButton("重置为预设")
+        self.reset_button.setIcon(qt_theme_icon("erase", MUTED, size=17))
+        self.reset_button.clicked.connect(self._reset_custom)
+        advanced_layout.addWidget(self.reset_button)
+        self.advanced_group.setVisible(False)
+        layout.addWidget(self.advanced_group)
+
+        # ------------------------------------------------- external model
+        layout.addWidget(self._build_model_group())
+
+        layout.addStretch(1)
+
+        self._sync()
+        self._sync_model()
+
+    # ------------------------------------------------------- external model
+
+    def _build_model_group(self) -> QWidget:
+        """The external redraw model: pick a folder, or be told what is missing.
+
+        The model is **not shipped** -- 183 MB of weights against a 178 MB
+        installer, and a CPU redraw peaks at 4.6 GB of RAM -- so this section
+        is the entire delivery mechanism. It therefore has to do three jobs in
+        the panel rather than in a log file: show which folder is in force,
+        let the user point somewhere else, and say what is missing when the
+        folder is not yet a model.
+        """
+        group = section("4 · 线稿重绘模型（外接）", compact=True)
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        note = QLabel(
+            "线稿重绘要用 Anime2Sketch 模型，安装包里不带它（权重 183 MB，"
+            "CPU 跑一次要 4.6 GB 内存）。在这里指定模型文件夹；不设置时"
+            "重绘功能提示未安装，其余功能不受影响。"
+        )
+        note.setWordWrap(True)
+        muted(note)
+        layout.addWidget(note)
+
+        # The path is shown in a read-only field rather than a label so a long
+        # path can be selected and copied -- on the machine that has the model
+        # the user often wants to hand it to someone else. The tooltip carries
+        # the whole path because the field is narrower than most of them.
+        self.model_path_edit = QLineEdit()
+        self.model_path_edit.setReadOnly(True)
+        self.model_path_edit.setPlaceholderText("尚未设置")
+        layout.addWidget(row("模型文件夹", self.model_path_edit))
+
+        buttons = QHBoxLayout()
+        buttons.setContentsMargins(0, 0, 0, 0)
+        buttons.setSpacing(6)
+        self.model_browse_button = QPushButton("选择文件夹…")
+        self.model_browse_button.setIcon(qt_theme_icon("open_folder", MUTED, size=17))
+        self.model_browse_button.clicked.connect(self._choose_model_dir)
+        buttons.addWidget(self.model_browse_button)
+
+        self.model_clear_button = QPushButton("清除")
+        self.model_clear_button.setIcon(qt_theme_icon("erase", MUTED, size=17))
+        self.model_clear_button.clicked.connect(self._clear_model_dir)
+        buttons.addWidget(self.model_clear_button)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+
+        self.model_status = QLabel()
+        self.model_status.setWordWrap(True)
+        layout.addWidget(self.model_status)
+
+        self.model_hint = QLabel()
+        self.model_hint.setWordWrap(True)
+        muted(self.model_hint)
+        layout.addWidget(self.model_hint)
+        return group
+
+    def focus_model_section(self) -> None:
+        """Bring the model controls into view and put the keyboard on them.
+
+        Called when another panel sends the user here (the preprocessing panel's
+        external-model button). Landing at the top of a long settings panel and
+        leaving them to find section 4 themselves is the kind of small betrayal
+        that makes a shortcut worse than none.
+        """
+        self.model_browse_button.setFocus(Qt.OtherFocusReason)
+        area = self.findChild(QScrollArea)
+        if area is not None and area.widget() is not None:
+            area.ensureWidgetVisible(self.model_browse_button, 24, 24)
+
+    def _choose_model_dir(self) -> None:
+        """Let the user point at a downloaded model folder."""
+        start = self.model_path_edit.text().strip() or ""
+        if not start:
+            from pcbart.model_paths import resolve_model_dir
+
+            start = str(resolve_model_dir())
+        chosen = QFileDialog.getExistingDirectory(self, "选择 Anime2Sketch 模型文件夹", start)
+        if not chosen:
+            return
+        save_settings_keeping(a2s_model=chosen)
+        self._sync_model()
+
+    def _clear_model_dir(self) -> None:
+        """Forget the chosen folder, falling back to the default drop-in spot."""
+        save_settings_keeping(a2s_model=None)
+        self._sync_model()
+
+    def _sync_model(self) -> None:
+        """Show where the model is coming from and whether it is complete."""
+        from pcbart.model_paths import (
+            DEFAULT_VARIANT,
+            check_model_dir,
+            resolve_model_dir,
+        )
+
+        # Deliberately the folder *in force*, even when it turns out to be
+        # unusable. Showing a different folder than the one the feature would
+        # actually load is the "interface says one thing, the program does
+        # another" defect this project treats as a bug; a wrong pick stays on
+        # screen next to what is missing from it.
+        effective = resolve_model_dir()
+        report = check_model_dir(effective, DEFAULT_VARIANT)
+        self.model_path_edit.setText(str(effective))
+        self.model_path_edit.setToolTip(str(effective))
+        self.model_clear_button.setVisible(bool(self._saved_model_setting()))
+
+        if report["ok"]:
+            self.model_status.setText(
+                f"✅ 可用：架构已就位，权重 {DEFAULT_VARIANT}"
+            )
+            tone(self.model_status, "success")
+        else:
+            # Only weight sets that are NOT the one in use are worth naming --
+            # "you have netG.pth" is useful when that is why the folder looked
+            # fine, and noise otherwise.
+            others = [
+                name
+                for name, here in report["weights"].items()
+                if here and name != DEFAULT_VARIANT
+            ]
+            extra = (
+                f"（这个文件夹里有 {'、'.join(others)}，"
+                f"但项目用的是 {DEFAULT_VARIANT}）"
+                if others
+                else ""
+            )
+            self.model_status.setText(
+                f"⚠️ 还不能用：缺少 {'；'.join(report['missing'])}。{extra}"
+                "按下面的命令获取，或【选择文件夹…】指向已下载好的那份。"
+            )
+            tone(self.model_status, "warning")
+
+        self.model_hint.setText(self._model_hint())
+
+    def _saved_model_setting(self) -> str:
+        from pcbart.ui_theme import load_settings
+
+        value = load_settings().get("a2s_model")
+        return value if isinstance(value, str) else ""
+
+    def _model_hint(self) -> str:
+        """Where the folder may come from, and how to fetch one.
+
+        ⚠️ The folder picked here is the *third* source consulted, so someone
+        who set the environment variable and then wonders why picking a folder
+        changes nothing needs to read that here rather than discover it.
+        """
+        from pcbart.model_paths import (
+            ARCHITECTURE_FILE,
+            MODEL_ENV,
+            WEIGHT_FILES,
+            default_model_dir,
+        )
+
+        needed = "、".join(
+            [ARCHITECTURE_FILE, *[str(relative) for relative in WEIGHT_FILES.values()]]
+        )
+        lines = [
+            f"需要的文件：{needed}",
+            f"默认位置：{default_model_dir()}",
+            "获取：python tools\\fetch_anime2sketch.py",
+        ]
+        override = os.environ.get(MODEL_ENV)
+        if override:
+            lines.insert(
+                0,
+                f"⚠️ 环境变量 {MODEL_ENV} 已设置，优先于这里的选择：{override}",
+            )
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------- actions
+
+    def _choose_seed(self, colour: str) -> None:
+        from pcbart.ui_theme import scheme_from_seed
+
+        if self._updating:
+            return
+        # Picking a preset discards any hand edits. Keeping them would produce
+        # a scheme that is half the old customisation and half the new preset,
+        # which is neither thing the user asked for.
+        self._apply(scheme_from_seed(colour, dark=self._scheme.dark))
+
+    def _on_mode_changed(self, index: int) -> None:
+        from pcbart.ui_theme import scheme_from_roles, scheme_from_seed
+
+        if self._updating:
+            return
+        dark = index == 1
+        if self._scheme.custom:
+            # The hand-picked colours are kept across a light/dark switch --
+            # throwing them away because the user also wanted a dark panel
+            # would lose work they did not undo.
+            self._apply(
+                scheme_from_roles(
+                    self._scheme.roles, seed=self._scheme.seed, dark=dark
+                )
+            )
+        else:
+            self._apply(scheme_from_seed(self._scheme.seed, dark=dark))
+
+    def _edit_role(self, role: str) -> None:
+        from PySide6.QtWidgets import QColorDialog
+
+        current = QColor(self._scheme[role])
+        chosen = QColorDialog.getColor(
+            current, self, f"选择颜色 — {dict(ROLE_LABELS)[role]}"
+        )
+        if not chosen.isValid():
+            return
+        from pcbart.ui_theme import scheme_from_roles
+
+        roles = dict(self._scheme.roles)
+        roles[role] = chosen.name()
+        self._apply(
+            scheme_from_roles(roles, seed=self._scheme.seed, dark=self._scheme.dark)
+        )
+
+    def _reset_custom(self) -> None:
+        from pcbart.ui_theme import scheme_from_seed
+
+        self._apply(scheme_from_seed(self._scheme.seed, dark=self._scheme.dark))
+
+    def _on_advanced_toggled(self, shown: bool) -> None:
+        self.advanced_group.setVisible(shown)
+        self.resize(self.width(), self.sizeHint().height())
+
+    def _apply(self, scheme) -> None:
+        """Hand the new scheme to the window, which owns the switch."""
+        window = self.parentWidget()
+        while window is not None and not hasattr(window, "apply_colour_scheme"):
+            window = window.parentWidget()
+        if window is None:
+            return
+        self._scheme = scheme
+        self._sync()
+        window.apply_colour_scheme(scheme)
+
+    # ---------------------------------------------------------------- view
+
+    def set_scheme(self, scheme) -> None:
+        """Adopt a scheme chosen elsewhere (the panel is rebuilt on switch)."""
+        self._scheme = scheme
+        self._sync()
+
+    def _sync(self) -> None:
+        from pcbart.ui_theme import PRESETS, scheme_from_seed
+
+        self._updating = True
+        try:
+            for swatch in self._swatches:
+                try:
+                    same = scheme_from_seed(swatch.colour, self._scheme.dark)
+                except ValueError:
+                    same = None
+                swatch.set_selected(
+                    not self._scheme.custom
+                    and same is not None
+                    and same.roles == self._scheme.roles
+                )
+            self.mode_combo.setCurrentIndex(1 if self._scheme.dark else 0)
+
+            if self._scheme.custom:
+                self.preset_note.setText(
+                    "当前是自定义配色（已手动改过颜色）。点任一预设会丢弃这些改动。"
+                )
+            else:
+                name = next(
+                    (
+                        n
+                        for n, c in PRESETS
+                        if scheme_from_seed(c, self._scheme.dark).roles
+                        == self._scheme.roles
+                    ),
+                    None,
+                )
+                self.preset_note.setText(
+                    f"当前：{name}　{self._scheme.seed}"
+                    if name
+                    else f"当前：自定义主色　{self._scheme.seed}"
+                )
+
+            self.mode_note.setText(
+                "深色界面适合暗环境长时间使用；画布始终是黑底，不受这里影响。"
+            )
+            for role, button in self._role_buttons.items():
+                colour = self._scheme[role]
+                button.setText(colour.upper())
+                button.setStyleSheet(
+                    f"QPushButton {{ background: {colour};"
+                    f" border: 1px solid {BORDER}; border-radius: 8px;"
+                    f" color: {self._scheme['on_accent'] if role == 'accent' else _readable_on(colour)};"
+                    f" font-size: 10px; padding: 0; }}"
+                )
+        finally:
+            self._updating = False
+
+
+def _readable_on(colour: str) -> str:
+    """Black or white, whichever reads on ``colour``."""
+    from pcbart.ui_theme import _on_colour
+
+    return _on_colour(colour)
+
+
+def show_settings(main_window: QWidget) -> "ThemeSettingsPanel | None":
+    """Open the colour settings panel, creating it on first use."""
+    global _settings_panel
+    _settings_panel, created = reusable_panel(
+        _settings_panel,
+        main_window,
+        lambda parent: ThemeSettingsPanel(parent, current_scheme()),
+    )
+    if created:
+        _settings_panel.resize(430, 620)
+        _settings_panel.place_top_right()
+    _settings_panel.set_scheme(current_scheme())
+    _settings_panel.show()
+    _settings_panel.raise_()
+    return _settings_panel
+
+
+_settings_panel: "ThemeSettingsPanel | None" = None
 
 
 def show_board_setup(main_window: QWidget) -> BoardSetupPanel | None:
@@ -4551,23 +6210,43 @@ def show_board_setup(main_window: QWidget) -> BoardSetupPanel | None:
         )
         return None
 
-    if _board_panel is None or _board_panel.parentWidget() is not main_window:
-        _board_panel = BoardSetupPanel(main_window, canvas.board)
+    _board_panel, created = reusable_panel(
+        _board_panel,
+        main_window,
+        lambda parent: BoardSetupPanel(parent, canvas.board, canvas),
+    )
+    # Refresh the reference even on the reuse path: a window can be re-pointed
+    # at another board, and a stale canvas would re-crop the wrong document.
+    _board_panel.canvas = canvas
+    if created:
         _board_panel.resize(400, 620)
         _board_panel.place_top_right()
 
         def on_changed() -> None:
-            canvas.update()
+            # This panel's subject is the board, and the board is what the view
+            # frames, so its edits take the fit again -- the user's own zoom is
+            # kept on top of it. Dragging a handle on the canvas is the one
+            # resize that must *not* come through here: that would rescale the
+            # view under the cursor and the edge would never catch up with it.
+            canvas.refit_view()
+            canvas.record_external_change(_board_panel.edit_run_key())
             inspector = getattr(main_window, "image_inspector", None)
             if inspector is not None and inspector.isVisible():
                 selected = canvas.selected
                 if selected is not None:
                     inspector.set_placement(selected)
-            preprocess = _preprocess_panel
-            if preprocess is not None and preprocess.parentWidget() is main_window:
-                preprocess._refresh_board_note()
+            preprocess = live_panel("_preprocess_panel")
+            if preprocess is not None:
+                try:
+                    if preprocess.parentWidget() is main_window:
+                        preprocess._refresh_board_note()
+                except RuntimeError:
+                    pass
 
         _board_panel.changed.connect(on_changed)
+        _board_panel.content_requested.connect(
+            lambda: open_template_content(main_window)
+        )
 
     _board_panel.show()
     _board_panel.raise_()
@@ -4575,6 +6254,962 @@ def show_board_setup(main_window: QWidget) -> BoardSetupPanel | None:
 
 
 _board_panel: BoardSetupPanel | None = None
+
+
+def open_template_content(window) -> "TemplateContentPanel | None":
+    """Open 模板内容 for whatever board is on screen.
+
+    One entry point, used by the menu and by the button inside 板框设置, so the
+    two can never drift into doing different things.
+
+    **The board does not have to be a card yet.** The panel opens regardless and
+    says what is missing, with a button that applies the 通行证 template. The
+    first version refused to open unless the board was already a card and
+    disabled its menu entry until then -- which meant a user who had not yet
+    applied a template saw a grey entry and concluded the feature did not
+    exist. Refusing with an explanation is only better than doing nothing if
+    the explanation is actually seen.
+
+    Edits are routed into the canvas history here rather than inside the panel:
+    the canvas owns the undo stack, and an edit that repaints but is not
+    recorded is worse than no undo at all, because the user believes Ctrl+Z
+    covers it.
+    """
+    canvas = getattr(window, "design_canvas", None)
+    if canvas is None:
+        return None
+    panel = show_template_content(window, canvas.board)
+
+    def on_changed() -> None:
+        canvas.update()
+        canvas.record_external_change()
+
+    # A second call must not stack a second connection, or one edit would be
+    # recorded twice and one Ctrl+Z would only undo half of it. Qt has no
+    # "is anything connected" query, so the attempt is made and the warning it
+    # raises when nothing was connected is swallowed -- that warning is written
+    # to stderr by the binding and would otherwise appear every time the panel
+    # is opened for the first time.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        try:
+            panel.changed.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+    panel.changed.connect(on_changed)
+    return panel
+
+
+class TemplateContentPanel(FloatingPanel):
+    """Everything the blank card carries, made editable.
+
+    Two lists and a search box, because those are the three things the user
+    asked to be able to change: *what the card says*, *where the hole is*, and
+    *whose card it is*.
+
+    **The operator search writes into the document, not into the text.** Picking
+    someone stores their name and number on the board and the lines keep their
+    ``{代号}`` / ``{编号}`` tokens, so switching operator re-renders every line
+    at once and the template's own wording survives. Substituting the values
+    into the strings instead would make the choice irreversible -- the second
+    operator would have to find the first one's name inside ``ARKNIGHTS-R001``
+    to replace it.
+
+    The panel is bound to a live board and re-pointed on a tab switch, the same
+    as every other panel: after switching tabs it has to edit the board that is
+    on screen, not the one it was opened for.
+    """
+
+    changed = Signal()
+    """Emitted after an edit, so the canvas repaints and the change is undoable."""
+
+    def __init__(self, parent: QWidget, board: ArtBoard, canvas=None) -> None:
+        super().__init__(parent, "模板内容")
+        self.resize(440, 680)
+        self._board = board
+        self.canvas = canvas
+        """The design canvas, so 套用模板 can re-crop the imported pictures.
+
+        Optional for the same reason it is on the board panel: tests and
+        scripts build this panel for its controls alone.
+        """
+        self._updating = False
+        self._db = operators.database()
+
+        layout = self.content_layout
+        layout.setSpacing(6)
+
+        # Shown only when the current board is not a card. A board with no
+        # template on it has no wording and no slot to edit, and the panel used
+        # to open with two empty lists -- which looks broken rather than
+        # explains itself.
+        self.not_a_card = QLabel()
+        self.not_a_card.setWordWrap(True)
+        warn_surface(self.not_a_card)
+        self.apply_button = QPushButton("套用「通行证」模板")
+        self.apply_button.setMinimumHeight(28)
+        self.apply_button.clicked.connect(self._on_apply_template)
+        layout.addWidget(self.not_a_card)
+        layout.addWidget(self.apply_button)
+
+        self.status_label = QLabel()
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+
+        self._build_operator_group(layout)
+        self._build_art_group(layout)
+        self._build_text_group(layout)
+        self._build_cutout_group(layout)
+        layout.addStretch(1)
+
+        self.refresh()
+
+    def _on_apply_template(self) -> None:
+        """Put the 通行证 template on this board, then show what it brought.
+
+        Done here rather than sending the user off to 板框设置: they opened this
+        panel wanting to edit a card, and the reason it was empty is the one
+        thing that has to change. Walking them to another panel and back is a
+        step that exists only because of how the code is arranged.
+
+        The pictures already on the board are re-framed here too -- the card
+        arrived after them, and without this they would keep the full-size
+        default 76.2 mm and have to be right-clicked into an opening by hand.
+        """
+        board = self._board
+        board.outline = badge_card.badge_spec()
+        board.outline_ready = True
+        board.texts = badge_card.badge_texts()
+        board.cutouts = badge_card.badge_cutouts()
+        if self.canvas is not None:
+            self.canvas.frame_illustrations_for_card()
+        self.refresh()
+        self.changed.emit()
+
+    # ------------------------------------------------------------------ operator
+
+    def _build_operator_group(self, layout: QVBoxLayout) -> None:
+        group = section("干员", compact=True)
+        self.operator_group = group
+        inner = QVBoxLayout(group)
+        inner.setContentsMargins(0, 0, 0, 0)
+        inner.setSpacing(4)
+
+        self.operator_search = QLineEdit()
+        self.operator_search.setPlaceholderText("输入干员名或编号…")
+        self.operator_search.setClearButtonEnabled(True)
+        self.operator_search.textChanged.connect(self._on_search)
+        inner.addWidget(self.operator_search)
+
+        self.operator_results = QListWidget()
+        self.operator_results.setFixedHeight(150)
+        self.operator_results.currentItemChanged.connect(self._on_operator_picked)
+        inner.addWidget(self.operator_results)
+
+        self.current_operator = QLabel()
+        self.current_operator.setWordWrap(True)
+        info_surface(self.current_operator)
+        inner.addWidget(self.current_operator)
+
+        # The number is editable on its own, not only through the operator
+        # lookup: the database is a scrape, and a card for someone whose 编号 is
+        # missing -- or simply different from what the wiki says -- has to be
+        # buildable. It drives both the text tokens **and the barcode**, so an
+        # edit re-renders the strip rather than leaving the printed code
+        # disagreeing with the printed number.
+        self.number_edit = QLineEdit()
+        self.number_edit.setPlaceholderText("情报编号（可直接改）")
+        self.number_edit.setClearButtonEnabled(True)
+        self.number_edit.textEdited.connect(self._on_number_edited)
+        inner.addWidget(row("编号", self.number_edit))
+
+        clear = QPushButton("清除选择")
+        clear.setFixedHeight(24)
+        clear.clicked.connect(self._on_clear_operator)
+        inner.addWidget(clear)
+
+        self.insert_art_button = QPushButton("把干员二维码与条形码放入卡面")
+        self.insert_art_button.setMinimumHeight(28)
+        self.insert_art_button.setToolTip(
+            "按当前干员生成透明底的二维码（45°）和情报编号条形码（90°），"
+            "分别放进各自的定位块，并删掉模板里的占位文字与定位块"
+        )
+        self.insert_art_button.clicked.connect(self._on_insert_card_art)
+        inner.addWidget(self.insert_art_button)
+
+        self.art_status = QLabel()
+        self.art_status.setWordWrap(True)
+        muted(self.art_status)
+        inner.addWidget(self.art_status)
+
+        layout.addWidget(group)
+
+    def _on_search(self, _text: str = "") -> None:
+        self._fill_results(self.operator_search.text())
+
+    def _fill_results(self, query: str) -> None:
+        """List matching operators, remembering who each row stands for.
+
+        What is remembered is the **page name**, not the display name: it is
+        the roster's unique key, and 暮落 / 暮落(集成战略) would otherwise be
+        two rows that resolve to the same person. The row's own text still
+        carries the name, profession and number; parsing that back apart would
+        break on a name containing the separator.
+        """
+        self._updating = True
+        try:
+            self.operator_results.clear()
+            for item in self._db.search(query):
+                entry = QListWidgetItem(item.display)
+                entry.setData(Qt.UserRole, item.page)
+                self.operator_results.addItem(entry)
+        finally:
+            self._updating = False
+
+    def _on_operator_picked(self, current, _previous=None) -> None:
+        if self._updating or current is None:
+            return
+        page = current.data(Qt.UserRole)
+        if not page:
+            return
+        self.apply_operator(page)
+
+    def apply_operator(self, name: str) -> bool:
+        """Store the operator on the document and re-render every token.
+
+        ``name`` may be either the page name (what the search list supplies) or
+        a bare display name (what a hand-built board or an older draft has).
+        The page name is tried first because a display name is not an identity:
+        暮落 and 暮落(集成战略) share one, and resolving by name gave the second
+        person the first person's QR symbol.
+
+        Returns whether it was found, so a caller -- a test, or the panel
+        restoring its own state -- can tell "picked" from "no such operator"
+        without inspecting the document afterwards.
+        """
+        person = self._db.find_page(name) or self._db.find(name)
+        if person is None:
+            return False
+        had_art = any(
+            item.import_id == badge_content.ART_IMPORT_ID
+            for item in self._board.placements
+        )
+        self._board.operator_name = person.name
+        self._board.operator_number = person.number
+        self._board.operator_page = person.page
+        self._refresh_operator_label()
+        # Every row that holds a token re-renders. Without this the choice
+        # looks like it did nothing: the label still shows `{代号}` because the
+        # list was built before the operator existed.
+        self._refresh_all_text_labels()
+        # Once the artwork is on the card it follows the operator, so picking
+        # someone else does not leave the previous person's QR code sitting
+        # there. Before that first insert nothing is added: choosing an operator
+        # to edit their wording should not silently draw four objects.
+        if had_art:
+            self._insert_card_art(announce=False)
+        self.changed.emit()
+        return True
+
+    def _on_number_edited(self, text: str) -> None:
+        """Take a hand-typed 编号 into the document, barcode included.
+
+        The barcode is rebuilt when the strip is already on the card, for the
+        same reason picking a different operator rebuilds it: otherwise the
+        printed code and the printed number on the same card would disagree,
+        and only a scanner would notice.
+        """
+        if self._updating:
+            return
+        value = text.strip()
+        if value == self._board.operator_number:
+            return
+        had_art = any(
+            item.import_id == badge_content.ART_IMPORT_ID
+            for item in self._board.placements
+        )
+        self._board.operator_number = value
+        self._refresh_operator_label()
+        self._refresh_all_text_labels()
+        if had_art:
+            self._insert_card_art(announce=False)
+        self.changed.emit()
+
+    def _on_clear_operator(self) -> None:
+        if not self._board.operator_name:
+            return
+        self._board.operator_name = ""
+        self._board.operator_number = ""
+        self._board.operator_page = ""
+        self._refresh_operator_label()
+        self._refresh_all_text_labels()
+        self.changed.emit()
+
+    def _on_insert_card_art(self) -> None:
+        """Drop the chosen operator's artwork onto the card.
+
+        Re-inserting replaces the previous set rather than stacking a second
+        copy: the user pressing the button twice wants the codes to follow the
+        operator they just picked, not four codes on one card. Removal is by
+        :data:`badge_content.ART_IMPORT_ID`, so pictures the user imported
+        themselves are left alone.
+        """
+        self._insert_card_art(announce=True)
+
+    def _insert_card_art(self, *, announce: bool) -> bool:
+        board = self._board
+        if not board.operator_name:
+            if announce:
+                self.art_status.setText("先在上面选一位干员。")
+            return False
+        try:
+            # The board's own 编号 is what the strip encodes: it may have been
+            # typed by hand, or cleared to deliberately print no barcode.
+            art = badge_content.badge_art(
+                board=board, number=board.operator_number
+            )
+        except badge_content.MissingArt as exc:
+            self.art_status.setText(str(exc))
+            return False
+
+        board.placements = [
+            item for item in board.placements if item.import_id != badge_content.ART_IMPORT_ID
+        ]
+        board.placements.extend(art.placements)
+        # The lines that *name* the artwork come off the card: keeping them next
+        # to the real thing prints the word "干员二维码" beside the symbol.
+        board.texts = [
+            item for item in board.texts if item.label not in badge_content.ART_ELEMENT_LABELS
+        ]
+        self._updating = True
+        try:
+            self.text_list.clear()
+            for item in board.texts:
+                self.text_list.addItem(QListWidgetItem(""))
+            for index in range(len(board.texts)):
+                self._refresh_text_label(index)
+            self.text_list.setCurrentRow(0 if board.texts else -1)
+        finally:
+            self._updating = False
+        self._report_art(art)
+        self.changed.emit()
+        return True
+
+    def _report_art(self, art: badge_content.BadgeArt) -> None:
+        """Say what landed on the card.
+
+        The per-element table above already lists every slot; this line reports
+        only what the *automatic* rule decided, so the reason a slot is empty
+        ("no 情报编号", "no 职业 in the roster") is visible rather than looking
+        like a failure.
+        """
+        notes: list[str] = []
+        if art.barcode is None and self._board.operator_number.strip():
+            notes.append("条形码未放")
+        if art.profession is None:
+            notes.append("资料库里没有职业")
+        # Automatic means the operator's own faction, and 罗德岛 is left empty
+        # on purpose -- the crest is already on the silkscreen above it.
+        if art.faction is None and not badge_content.resolved_choice(
+            self._board, "faction"
+        ):
+            faction = str(getattr(self._current_person(), "faction", "") or "")
+            notes.append(
+                "阵营 logo 未放（罗德岛的标志已在丝印层）"
+                if faction == badge_content.RHODES_FACTION
+                else "资料库里没有阵营 logo"
+            )
+        self.art_status.setText("；".join(notes) if notes else "")
+
+    def _current_person(self):
+        board = self._board
+        return self._db.find_page(board.operator_page) or self._db.find(
+            board.operator_name
+        )
+
+    # -------------------------------------------------------------- card art
+
+    def _build_art_group(self, layout: QVBoxLayout) -> None:
+        """One searchable row per element the card puts on automatically.
+
+        The automatic rule is a good default and a bad cage: the roster is a
+        scrape, and the user may want a different profession icon, a different
+        faction, or a plain card with no crest. Each row therefore offers
+        **自动 / 不放 / a chosen asset**, searchable, and re-inserting applies
+        it immediately.
+
+        The 罗德岛 crest is listed here as well even though it is not an
+        artwork *slot*: the user asked to be able to remove it like the rest.
+        """
+        group = section("卡面素材", compact=True)
+        self.art_group = group
+        inner = QVBoxLayout(group)
+        inner.setContentsMargins(0, 0, 0, 0)
+        inner.setSpacing(4)
+
+        intro = QLabel(
+            "每项都可以改成别的、也可以不放。改完立刻重放到卡面。"
+        )
+        intro.setWordWrap(True)
+        muted(intro)
+        inner.addWidget(intro)
+
+        self.art_search = QLineEdit()
+        self.art_search.setPlaceholderText("搜索素材（职业 / 阵营 / 干员名）…")
+        self.art_search.setClearButtonEnabled(True)
+        self.art_search.textChanged.connect(self._on_art_search)
+        inner.addWidget(self.art_search)
+
+        self.art_list = QListWidget()
+        self.art_list.setFixedHeight(150)
+        self.art_list.currentRowChanged.connect(self._on_art_row)
+        inner.addWidget(self.art_list)
+
+        self.art_pick = combo(["自动", "不放"])
+        self.art_pick.currentIndexChanged.connect(self._on_art_pick)
+        inner.addWidget(row("这一项", self.art_pick))
+
+        self.art_apply = QPushButton("重放到卡面")
+        self.art_apply.setMinimumHeight(26)
+        self.art_apply.clicked.connect(self._on_reapply_art)
+        inner.addWidget(self.art_apply)
+
+        layout.addWidget(group)
+
+    def _art_rows(self) -> list[tuple[str, str]]:
+        """``(kind, label)`` for every element, in listing order."""
+        return [
+            ("qr", "二维码"),
+            ("barcode", "条形码"),
+            ("profession", "职业图标"),
+            ("faction", "阵营 logo"),
+            (badge_content.EMBLEM_KIND, "罗德岛标志（丝印）"),
+        ]
+
+    def _on_art_search(self, _text: str = "") -> None:
+        self._fill_art_list()
+
+    def _fill_art_list(self) -> None:
+        """List the rows, narrowed by the search box.
+
+        Matching is on the row's own label and its current choice, so typing a
+        profession or faction name finds the element using it.
+        """
+        query = self.art_search.text().strip().casefold()
+        self._updating = True
+        try:
+            self.art_list.clear()
+            for kind, label in self._art_rows():
+                choice = self._describe_choice(kind)
+                text = f"{label}　·　{choice}"
+                if query and query not in text.casefold():
+                    continue
+                entry = QListWidgetItem(text)
+                entry.setData(Qt.UserRole, kind)
+                self.art_list.addItem(entry)
+        finally:
+            self._updating = False
+        if self.art_list.count() and self.art_list.currentRow() < 0:
+            self.art_list.setCurrentRow(0)
+        self._on_art_row(self.art_list.currentRow())
+
+    def _art_kind_at(self, index: int) -> str:
+        if not 0 <= index < self.art_list.count():
+            return ""
+        return self.art_list.item(index).data(Qt.UserRole) or ""
+
+    def _describe_choice(self, kind: str) -> str:
+        choice = badge_content.resolved_choice(self._board, kind)
+        if choice == badge_content.CHOICE_OFF:
+            return "不放"
+        if choice:
+            return choice
+        return "自动"
+
+    def _art_options(self, kind: str) -> list[str]:
+        """The pickable values for one row: 自动, 不放, then every asset."""
+        options = ["自动", "不放"]
+        if kind == "profession":
+            options += sorted(
+                {
+                    person.profession
+                    for person in self._db.operators
+                    if person.profession
+                }
+            )
+        elif kind == "faction":
+            options += sorted(
+                {
+                    person.faction
+                    for person in self._db.operators
+                    if person.faction
+                }
+            )
+        return options
+
+    def _on_art_row(self, index: int) -> None:
+        kind = self._art_kind_at(index)
+        enabled = bool(kind)
+        self.art_pick.setEnabled(enabled)
+        self.art_apply.setEnabled(enabled)
+        if not enabled:
+            return
+        self._updating = True
+        try:
+            self.art_pick.clear()
+            self.art_pick.addItems(self._art_options(kind))
+            current = self._describe_choice(kind)
+            found = self.art_pick.findText(current)
+            self.art_pick.setCurrentIndex(found if found >= 0 else 0)
+        finally:
+            self._updating = False
+
+    def _on_art_pick(self, _index: int = 0) -> None:
+        """Record the pick, then put the whole set back on the card."""
+        if self._updating:
+            return
+        kind = self._art_kind_at(self.art_list.currentRow())
+        if not kind:
+            return
+        value = self.art_pick.currentText()
+        if value == "自动":
+            self._board.art_choices.pop(kind, None)
+        elif value == "不放":
+            self._board.art_choices[kind] = badge_content.CHOICE_OFF
+        else:
+            self._board.art_choices[kind] = value
+        self._reapply_art()
+
+    def _on_reapply_art(self) -> None:
+        self._reapply_art()
+
+    def _reapply_art(self) -> None:
+        """Put the current choices on the card.
+
+        ``badge_art`` is the single implementation of "what belongs on the
+        card", so a change is one rebuild rather than a per-element edit here.
+        The panel never inserts on its own: it always calls the same path the
+        button does, so the two cannot drift apart.
+        """
+        if not self._board.operator_name:
+            self.art_status.setText("先在上面选一位干员。")
+            return
+        # ``_insert_card_art`` reports the result itself.
+        self._insert_card_art(announce=False)
+        # ⚠️ **Only the current row's label is refreshed, not the whole list.**
+        # Rebuilding the list re-selects the row, which re-runs ``_on_art_row``
+        # and resets the combo to the value read back from the document -- so a
+        # second pick in the same session was silently reverted to the first.
+        # Measured: choosing 不放 then 术师 left the choice at 不放.
+        self._refresh_art_row_label()
+
+    def _refresh_art_row_label(self) -> None:
+        """Rewrite the current row's text so it shows the chosen value."""
+        index = self.art_list.currentRow()
+        kind = self._art_kind_at(index)
+        if not kind:
+            return
+        label = dict(self._art_rows())[kind]
+        self._updating = True
+        try:
+            self.art_list.item(index).setText(
+                f"{label}　·　{self._describe_choice(kind)}"
+            )
+        finally:
+            self._updating = False
+
+    def _refresh_all_text_labels(self) -> None:
+        for index in range(len(self._board.texts)):
+            self._refresh_text_label(index)
+
+    def _refresh_operator_label(self) -> None:
+        board = self._board
+        # The box shows the document's value, and is only written when it
+        # differs -- typing into it must not be undone by the next refresh.
+        if self.number_edit.text() != board.operator_number:
+            self.number_edit.setText(board.operator_number)
+        if not board.operator_name:
+            self.current_operator.setText("尚未选择干员　·　代号与编号保持为占位符")
+            return
+        person = self._db.find_page(board.operator_page) or self._db.find(
+            board.operator_name
+        )
+        parts = [f"当前：{board.operator_name}"]
+        if board.operator_number:
+            parts.append(board.operator_number)
+        if person is not None:
+            if person.profession:
+                parts.append(person.profession)
+            if person.faction:
+                parts.append(person.faction)
+        self.current_operator.setText("　".join(parts))
+
+    # -------------------------------------------------------------------- text
+
+    def _build_text_group(self, layout: QVBoxLayout) -> None:
+        group = section("文字", compact=True)
+        self.text_group = group
+        inner = QVBoxLayout(group)
+        inner.setContentsMargins(0, 0, 0, 0)
+        inner.setSpacing(4)
+
+        intro = QLabel(
+            "每张卡上的字都能改。行内可以写 {代号} 和 {编号}，"
+            "选好干员后会自动替换成该干员的值。"
+        )
+        intro.setWordWrap(True)
+        muted(intro)
+        inner.addWidget(intro)
+
+        self.text_list = QListWidget()
+        self.text_list.setFixedHeight(170)
+        self.text_list.currentRowChanged.connect(self._on_text_row)
+        inner.addWidget(self.text_list)
+
+        self.text_edit = QLineEdit()
+        self.text_edit.setPlaceholderText("这一行显示的文字")
+        self.text_edit.textEdited.connect(self._on_text_changed)
+        inner.addWidget(row("内容", self.text_edit))
+
+        # Three decimals, not two: the template's own positions are quoted to
+        # 0.001 mm (``-13.633``), and a two-decimal field rounds that to
+        # ``-13.63`` on the first write -- so merely opening the panel and
+        # nudging an unrelated field would shift every line, invisibly at
+        # first and cumulatively over a session.
+        self.text_size = spin(1.0, 0.2, 40.0, 0.1, " mm", decimals=3)
+        self.text_size.valueChanged.connect(self._on_text_geometry)
+        inner.addWidget(row("字号", self.text_size))
+
+        self.text_x = spin(0.0, -1000.0, 1000.0, 0.5, " mm", decimals=3)
+        self.text_y = spin(0.0, -1000.0, 1000.0, 0.5, " mm", decimals=3)
+        self.text_x.valueChanged.connect(self._on_text_geometry)
+        self.text_y.valueChanged.connect(self._on_text_geometry)
+        inner.addWidget(row("锚点 X", self.text_x))
+        inner.addWidget(row("锚点 Y", self.text_y))
+
+        self.text_rotation = spin(0.0, -180.0, 180.0, 90.0, "°", decimals=1)
+        self.text_rotation.valueChanged.connect(self._on_text_geometry)
+        inner.addWidget(row("旋转", self.text_rotation))
+
+        self.text_layer = combo([item.name for item in LAYERS])
+        self.text_layer.currentIndexChanged.connect(self._on_text_geometry)
+        inner.addWidget(row("图层", self.text_layer))
+
+        reset = QPushButton("恢复模板原文")
+        reset.setFixedHeight(26)
+        reset.clicked.connect(self._on_reset_text)
+        inner.addWidget(reset)
+
+        layout.addWidget(group)
+
+    def _on_text_row(self, index: int) -> None:
+        """Show the chosen line's values without echoing them back as edits."""
+        self._updating = True
+        try:
+            item = self._text_at(index)
+            enabled = item is not None
+            for widget in (
+                self.text_edit,
+                self.text_size,
+                self.text_x,
+                self.text_y,
+                self.text_rotation,
+                self.text_layer,
+            ):
+                widget.setEnabled(enabled)
+            if item is None:
+                self.text_edit.clear()
+                return
+            self.text_edit.setText(item.text)
+            self.text_size.setValue(item.size_mm)
+            self.text_x.setValue(item.x_mm)
+            self.text_y.setValue(item.y_mm)
+            self.text_rotation.setValue(item.rotation_deg)
+            index_ = self.text_layer.findText(item.layer)
+            if index_ >= 0:
+                self.text_layer.setCurrentIndex(index_)
+        finally:
+            self._updating = False
+
+    def _text_at(self, index: int):
+        if 0 <= index < len(self._board.texts):
+            return self._board.texts[index]
+        return None
+
+    def _on_text_changed(self, text: str) -> None:
+        if self._updating:
+            return
+        item = self._text_at(self.text_list.currentRow())
+        if item is None:
+            return
+        item.text = text
+        self._refresh_text_label(self.text_list.currentRow())
+        self.changed.emit()
+
+    def _on_text_geometry(self) -> None:
+        if self._updating:
+            return
+        item = self._text_at(self.text_list.currentRow())
+        if item is None:
+            return
+        item.size_mm = self.text_size.value()
+        item.x_mm = self.text_x.value()
+        item.y_mm = self.text_y.value()
+        item.rotation_deg = self.text_rotation.value()
+        item.layer = self.text_layer.currentText()
+        self.changed.emit()
+
+    def _on_reset_text(self) -> None:
+        """Put the selected line back to the template's own wording.
+
+        Only that line, and only its wording: the position is something the
+        user may have moved on purpose, and resetting it too would undo work
+        they did not ask to lose.
+        """
+        index = self.text_list.currentRow()
+        item = self._text_at(index)
+        source = self._template_text(index)
+        if item is None or source is None:
+            return
+        item.text = source.text
+        self._updating = True
+        try:
+            self.text_edit.setText(item.text)
+        finally:
+            self._updating = False
+        self._refresh_text_label(index)
+        self.changed.emit()
+
+    @staticmethod
+    def _template_text(index: int):
+        items = badge_card.BADGE_TEXTS
+        return items[index] if 0 <= index < len(items) else None
+
+    def _refresh_text_label(self, index: int) -> None:
+        item = self._text_at(index)
+        entry = self.text_list.item(index)
+        if item is None or entry is None:
+            return
+        label = item.label or f"文字 {index + 1}"
+        shown = item.resolved_text(
+            name=self._board.operator_name, number=self._board.operator_number
+        )
+        entry.setText(f"{label}　·　{shown}")
+
+    # ----------------------------------------------------------------- cutouts
+
+    def _build_cutout_group(self, layout: QVBoxLayout) -> None:
+        group = section("挖槽", compact=True)
+        self.cutout_group = group
+        inner = QVBoxLayout(group)
+        inner.setContentsMargins(0, 0, 0, 0)
+        inner.setSpacing(4)
+
+        intro = QLabel("板子上真正被切掉的孔，位置与尺寸都可以改。")
+        intro.setWordWrap(True)
+        muted(intro)
+        inner.addWidget(intro)
+
+        self.cutout_list = QListWidget()
+        self.cutout_list.setFixedHeight(52)
+        self.cutout_list.currentRowChanged.connect(self._on_cutout_row)
+        inner.addWidget(self.cutout_list)
+
+        self.cutout_width = spin(20.0, 0.5, 60.0, 0.5, " mm", decimals=3)
+        self.cutout_height = spin(3.0, 0.5, 60.0, 0.5, " mm", decimals=3)
+        self.cutout_x = spin(0.0, -1000.0, 1000.0, 0.5, " mm", decimals=3)
+        self.cutout_y = spin(0.0, -1000.0, 1000.0, 0.5, " mm", decimals=3)
+        for widget in (
+            self.cutout_width,
+            self.cutout_height,
+            self.cutout_x,
+            self.cutout_y,
+        ):
+            widget.valueChanged.connect(self._on_cutout_changed)
+        inner.addWidget(row("宽", self.cutout_width))
+        inner.addWidget(row("高", self.cutout_height))
+        inner.addWidget(row("中心 X", self.cutout_x))
+        inner.addWidget(row("中心 Y", self.cutout_y))
+
+        self.cutout_error = QLabel()
+        self.cutout_error.setWordWrap(True)
+        warn_surface(self.cutout_error)
+        inner.addWidget(self.cutout_error)
+
+        layout.addWidget(group)
+
+    def _on_cutout_row(self, index: int) -> None:
+        self._updating = True
+        try:
+            item = self._cutout_at(index)
+            enabled = item is not None
+            for widget in (
+                self.cutout_width,
+                self.cutout_height,
+                self.cutout_x,
+                self.cutout_y,
+            ):
+                widget.setEnabled(enabled)
+            if item is None:
+                return
+            self.cutout_height.setEnabled(item.shape != "circle")
+            self.cutout_width.setValue(item.width_mm)
+            self.cutout_height.setValue(item.height_mm)
+            self.cutout_x.setValue(item.x_mm)
+            self.cutout_y.setValue(item.y_mm)
+        finally:
+            self._updating = False
+        self._refresh_cutout_error()
+
+    def _cutout_at(self, index: int):
+        if 0 <= index < len(self._board.cutouts):
+            return self._board.cutouts[index]
+        return None
+
+    def _on_cutout_changed(self) -> None:
+        if self._updating:
+            return
+        item = self._cutout_at(self.cutout_list.currentRow())
+        if item is None:
+            return
+        item.width_mm = self.cutout_width.value()
+        item.height_mm = (
+            item.width_mm if item.shape == "circle" else self.cutout_height.value()
+        )
+        item.x_mm = self.cutout_x.value()
+        item.y_mm = self.cutout_y.value()
+        self._refresh_cutout_error()
+        self.changed.emit()
+
+    def _refresh_cutout_error(self) -> None:
+        item = self._cutout_at(self.cutout_list.currentRow())
+        problems = item.validate() if item is not None else []
+        self.cutout_error.setText("；".join(problems))
+        self.cutout_error.setVisible(bool(problems))
+
+    # ------------------------------------------------------------------ binding
+
+    def _set_editors_visible(self, visible: bool) -> None:
+        for group in (
+            self.operator_group,
+            self.art_group,
+            self.text_group,
+            self.cutout_group,
+        ):
+            group.setVisible(visible)
+
+    def set_board(self, board: ArtBoard) -> None:
+        """Point the panel at another board, as a tab switch requires."""
+        self._board = board
+        self.refresh()
+
+    def refresh(self) -> None:
+        """Rebuild both lists from the document."""
+        is_card = _is_badge_board(self._board)
+        self.not_a_card.setVisible(not is_card)
+        self.apply_button.setVisible(not is_card)
+        if not is_card:
+            self.not_a_card.setText(
+                "当前板子还不是【通行证】模板卡，所以没有可编辑的文字与挖槽。"
+                "点下面的按钮套用模板。"
+            )
+        # The editors are hidden rather than left empty on a non-card: an empty
+        # list plus a disabled search box is what "broken" looks like, whereas
+        # one line of explanation plus a button is what "not yet" looks like.
+        self._set_editors_visible(is_card)
+        self._updating = True
+        try:
+            self.text_list.clear()
+            for item in self._board.texts:
+                self.text_list.addItem(QListWidgetItem(""))
+            for index in range(len(self._board.texts)):
+                self._refresh_text_label(index)
+
+            self.cutout_list.clear()
+            for item in self._board.cutouts:
+                self.cutout_list.addItem(QListWidgetItem(item.label))
+
+            if self._board.texts:
+                self.text_list.setCurrentRow(0)
+            if self._board.cutouts:
+                self.cutout_list.setCurrentRow(0)
+        finally:
+            self._updating = False
+
+        self._refresh_operator_label()
+        # Restore the search box to the current operator so a re-pointed panel
+        # is showing the board it is actually editing. ``operator_search`` is a
+        # QLineEdit: the old code called ``findText``/``setCurrentIndex``, which
+        # belong to QComboBox and made every refresh raise AttributeError.
+        if self._board.operator_name and not self.operator_search.text():
+            self.operator_search.setText(self._board.operator_name)
+        self._fill_results(self.operator_search.text())
+        # The choices belong to the document, so a re-pointed panel shows the
+        # new board's own set rather than the previous tab's.
+        self._fill_art_list()
+        if self._db:
+            self.status_label.setText(
+                f"干员资料库：{len(self._db)} 名　·　{self._db.source}"
+            )
+            info_surface(self.status_label)
+        else:
+            self.status_label.setText(
+                "找不到干员资料库，搜索不可用；"
+                "模板文字与挖槽仍可编辑。\n"
+                f"查找位置：{operators.db_path()}"
+            )
+            warn_surface(self.status_label)
+
+        self._on_text_row(self.text_list.currentRow())
+        self._on_cutout_row(self.cutout_list.currentRow())
+        self._refresh_art_status()
+
+    def _refresh_art_status(self) -> None:
+        """Say whether this board already carries the operator's artwork.
+
+        Without this the panel opens on a finished card with a blank status
+        line, which reads as "nothing was inserted" even though the codes are
+        sitting on the board.
+        """
+        on_card = [
+            item
+            for item in self._board.placements
+            if item.import_id == badge_content.ART_IMPORT_ID
+        ]
+        if not on_card:
+            self.art_status.setText("")
+            return
+        kinds = {item.layer for item in on_card}
+        self.art_status.setText(f"卡面上已有 {len(on_card)} 个素材对象　·　{len(kinds)} 个图层")
+
+
+_template_content_panel: "TemplateContentPanel | None" = None
+
+
+def show_template_content(main_window: QWidget, board: ArtBoard) -> TemplateContentPanel:
+    """Show the template-content panel, reusing or re-targeting the cached one."""
+    global _template_content_panel
+    canvas = getattr(main_window, "design_canvas", None)
+    _template_content_panel, created = reusable_panel(
+        _template_content_panel,
+        main_window,
+        lambda window: TemplateContentPanel(window, board, canvas),
+    )
+    if not created:
+        # A tab switch re-points the panel rather than opening a second one:
+        # two panels editing two boards would both look like "the" template
+        # panel, and the one on screen is the one the user believes they are
+        # typing into.
+        _template_content_panel.set_board(board)
+    # Refresh the canvas reference on both paths, so a panel pointed at another
+    # board re-crops that board's pictures rather than the previous one's.
+    _template_content_panel.canvas = canvas
+    if created:
+        _template_content_panel.resize(440, 680)
+        _template_content_panel.place_top_right()
+    _template_content_panel.show()
+    _template_content_panel.raise_()
+    return _template_content_panel
 
 
 class LayerPanel(QWidget):
@@ -4612,14 +7247,14 @@ class LayerPanel(QWidget):
         layout.setSpacing(6)
 
         title = QLabel("图层")
-        title.setStyleSheet(f"color: {TEXT}; font-weight: 600; font-size: 13px;")
+        themed(title, lambda: f"color: {TEXT}; font-weight: 600; font-size: 13px;")
         layout.addWidget(title)
 
         intro = QLabel(
             "「当前」层接收新导入的图片；取消勾选即隐藏，隐藏的层不能被选中。"
         )
         intro.setWordWrap(True)
-        intro.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        muted(intro)
         layout.addWidget(intro)
 
         header = QWidget()
@@ -4628,7 +7263,7 @@ class LayerPanel(QWidget):
         header_layout.setSpacing(6)
         for text, stretch in (("当前", 0), ("", 0), ("层名", 1), ("显示", 0)):
             label = QLabel(text)
-            label.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+            muted(label)
             header_layout.addWidget(label, stretch)
         layout.addWidget(header)
 
@@ -4637,10 +7272,7 @@ class LayerPanel(QWidget):
 
         self.status_label = QLabel()
         self.status_label.setWordWrap(True)
-        self.status_label.setStyleSheet(
-            f"background: {PANEL_BG}; border: 1px solid {BORDER};"
-            f"border-radius: 4px; padding: 6px 8px; font-size: 11px;"
-        )
+        info_surface(self.status_label)
         layout.addWidget(self.status_label)
         layout.addStretch(1)
 
@@ -4793,6 +7425,365 @@ def show_layers(main_window: QWidget, *, focus: bool = True) -> LayerPanel | Non
 _layer_panel: LayerPanel | None = None
 
 
+class GroupManagerPanel(FloatingPanel):
+    """组合管理：which elements are grouped, what they are called, and how to undo it.
+
+    The user asked for three things by name -- choose which elements go in,
+    leave a group, and manage/rename them -- and they are all the same
+    question asked from different directions, so they live in one panel rather
+    than three menu items with no place to see the result.
+
+    ⚠️ **The member list is what makes this honest.** A group is invisible on
+    the canvas -- the artwork looks the same whether or not it belongs to one
+    -- so without a place that lists the members, "组合成功了吗" has no answer
+    the user can check. Every row therefore spells out what is in it.
+    """
+
+    changed = Signal()
+    """Emitted after an edit, so the canvas repaints and the change is undoable."""
+
+    def __init__(self, parent: QWidget, canvas) -> None:
+        super().__init__(parent, "组合管理")
+        self.resize(460, 560)
+        self._canvas = canvas
+        self._updating = False
+        # ⚠️ Set **before** any widget is built. ``currentRowChanged`` fires
+        # while the list boxes are being populated, which reaches
+        # ``_refresh_buttons`` and reads this -- and a missing attribute there
+        # is an exception raised from inside a Qt signal, which aborts the
+        # caller's `show` rather than surfacing as a failed operation.
+        self._pending: list = []
+
+        layout = self.content_layout
+        layout.setSpacing(6)
+
+        intro = QLabel(
+            "勾选要组合的元素，点【组合所选】。组合在导出时会写成 EDA 的"
+            "组合记录，在 EDA 里也显示为一个元素。"
+        )
+        intro.setWordWrap(True)
+        muted(intro)
+        layout.addWidget(intro)
+
+        self.status = QLabel()
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+
+        # ---------------------------------------------------- existing groups
+        groups_box = section("1 · 已有组合", compact=True)
+        groups_layout = QVBoxLayout(groups_box)
+        groups_layout.setContentsMargins(0, 0, 0, 0)
+        groups_layout.setSpacing(4)
+        self.group_list = QListWidget()
+        self.group_list.setMinimumHeight(120)
+        self.group_list.currentRowChanged.connect(self._on_group_selected)
+        groups_layout.addWidget(self.group_list)
+
+        name_row = QWidget()
+        name_layout = QHBoxLayout(name_row)
+        name_layout.setContentsMargins(0, 0, 0, 0)
+        name_layout.setSpacing(6)
+        name_layout.addWidget(QLabel("名称"))
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("给这个组合起个名字")
+        self.name_edit.editingFinished.connect(self._on_rename)
+        name_layout.addWidget(self.name_edit, 1)
+        groups_layout.addWidget(name_row)
+
+        button_row = QWidget()
+        button_layout = QHBoxLayout(button_row)
+        button_layout.setContentsMargins(0, 0, 0, 0)
+        button_layout.setSpacing(6)
+        self.select_button = QPushButton("选中")
+        self.select_button.clicked.connect(self._on_select_group)
+        self.ungroup_button = QPushButton("解散组合")
+        self.ungroup_button.clicked.connect(self._on_ungroup)
+        button_layout.addWidget(self.select_button)
+        button_layout.addWidget(self.ungroup_button)
+        button_layout.addStretch(1)
+        groups_layout.addWidget(button_row)
+        layout.addWidget(groups_box)
+
+        # ------------------------------------------------------- new group
+        create_box = section("2 · 组合所选元素", compact=True)
+        create_layout = QVBoxLayout(create_box)
+        create_layout.setContentsMargins(0, 0, 0, 0)
+        create_layout.setSpacing(4)
+
+        self.selection_list = QListWidget()
+        self.selection_list.setMinimumHeight(140)
+        self.selection_list.currentRowChanged.connect(self._on_selection_row)
+        create_layout.addWidget(self.selection_list)
+
+        self.add_button = QPushButton("＋ 把画布上选中的元素加入")
+        self.add_button.clicked.connect(self._on_add_selection)
+        create_layout.addWidget(self.add_button)
+
+        self.new_name_edit = QLineEdit()
+        self.new_name_edit.setPlaceholderText("新组合的名称（可留空）")
+        create_layout.addWidget(self.new_name_edit)
+
+        self.make_button = QPushButton("组合所选")
+        self.make_button.setMinimumHeight(28)
+        self.make_button.clicked.connect(self._on_make_group)
+        create_layout.addWidget(self.make_button)
+
+        self.remove_button = QPushButton("从列表移除选中项")
+        self.remove_button.clicked.connect(self._on_remove_rows)
+        create_layout.addWidget(self.remove_button)
+        layout.addWidget(create_box)
+
+        layout.addStretch(1)
+        # The entries the panel offers are exactly the ones the canvas can
+        # perform; both ask the same question, so the checkboxes here and the
+        # menu's greyed-out state cannot disagree.
+        self.refresh()
+
+    # ------------------------------------------------------------- model
+
+    @property
+    def board(self):
+        return self._canvas.board
+
+    def _group_row_text(self, group) -> str:
+        """One line describing a group, short enough to read without scrolling.
+
+        ⚠️ The row used to list every member's full file name, which overran the
+        panel and produced a horizontal scrollbar -- so the user saw
+        「图片 pcbart-shot…（板画·白）、」 and had to scroll to find out what
+        the group was. The row now names the group and *counts* what is in it;
+        the members themselves are the pending list's job, one section down,
+        where there is room to spell them out.
+        """
+        members = self.board.group_all_members(group)
+        counts: dict[str, int] = {}
+        for item in members:
+            label = "文字" if _is_text_element(item) else "图片"
+            counts[label] = counts.get(label, 0) + 1
+        summary = "、".join(f"{count} 个{label}" for label, count in counts.items())
+        tones = sorted(
+            {
+                {"white": "白", "black": "黑"}.get(item.tone, "")
+                for item in members
+                if not _is_text_element(item)
+            }
+            - {""}
+        )
+        if tones:
+            summary += f"（板画 {''.join(tones)}）"
+        return f"{self.board.group_label(group)}：{summary}"
+
+    def refresh(self) -> None:
+        """Rebuild both lists from the document and the current selection."""
+        self._updating = True
+        try:
+            current = self._current_group()
+            self.group_list.clear()
+            for group in self.board.groups:
+                self.group_list.addItem(QListWidgetItem(self._group_row_text(group)))
+            if current is not None and current in self.board.groups:
+                self.group_list.setCurrentRow(self.board.groups.index(current))
+            elif self.board.groups:
+                self.group_list.setCurrentRow(0)
+
+            # The pending list keeps whatever the user assembled, minus the
+            # objects that are no longer on the board at all.
+            live = {id(item) for item in (*self.board.placements, *self.board.texts)}
+            self._pending = [
+                item for item in getattr(self, "_pending", []) if id(item) in live
+            ]
+            self._refresh_pending()
+            self._refresh_buttons()
+        finally:
+            self._updating = False
+
+    def _refresh_pending(self) -> None:
+        self.selection_list.clear()
+        for item in self._pending:
+            group = self.board.group_of(item)
+            suffix = f"　[已在「{self.board.group_label(group)}」]" if group else ""
+            self.selection_list.addItem(
+                QListWidgetItem(f"{_element_kind_name(item)}{suffix}")
+            )
+
+    def _refresh_buttons(self) -> None:
+        row = self.group_list.currentRow()
+        has_group = 0 <= row < len(self.board.groups)
+        self.ungroup_button.setEnabled(has_group)
+        self.select_button.setEnabled(has_group)
+        self.name_edit.setEnabled(has_group)
+        self.make_button.setEnabled(len(self._pending) >= 2)
+        self.remove_button.setEnabled(bool(self.selection_list.selectedItems()))
+        self.add_button.setEnabled(self._canvas.selected is not None)
+
+    def _current_group(self):
+        row = self.group_list.currentRow()
+        if 0 <= row < len(self.board.groups):
+            return self.board.groups[row]
+        return None
+
+    # ------------------------------------------------------------ actions
+
+    def _on_group_selected(self, _row: int) -> None:
+        group = self._current_group()
+        self.name_edit.blockSignals(True)
+        self.name_edit.setText(self.board.group_label(group) if group else "")
+        self.name_edit.blockSignals(False)
+        self.name_edit.setPlaceholderText(
+            "给这个组合起个名字" if group else "先在上面选一个组合"
+        )
+        self._refresh_buttons()
+
+    def _on_rename(self) -> None:
+        if self._updating:
+            return
+        group = self._current_group()
+        if group is None:
+            return
+        if not self.board.rename_group(group, self.name_edit.text()):
+            return
+        self._apply(f"已重命名为「{self.board.group_label(group)}」")
+
+    def _on_select_group(self) -> None:
+        group = self._current_group()
+        if group is None or not self._canvas.select_group(group):
+            return
+        self._set_status(f"已选中「{self.board.group_label(group)}」的全部元素")
+
+    def _on_ungroup(self) -> None:
+        group = self._current_group()
+        if group is None:
+            return
+        label = self.board.group_label(group)
+        if not self.board.dissolve_group(group):
+            return
+        self._apply(f"已解散「{label}」，元素都还在")
+
+    def _on_add_selection(self) -> None:
+        """Put whatever is selected on the canvas into the pending list.
+
+        The user asked to choose the elements freely, and this is that choice:
+        select on the canvas -- Ctrl-click for several, Shift-click for a range
+        -- then bring the set in here. The panel deliberately does not try to
+        guess the set from its own list, because the canvas is where the user
+        can see what they are picking.
+        """
+        chosen = self._canvas.selection_set()
+        if not chosen:
+            self._set_status("画布上还没有选中任何元素", warn=True)
+            return
+        pending = list(getattr(self, "_pending", []))
+        added = 0
+        for item in chosen:
+            if item not in pending:
+                pending.append(item)
+                added += 1
+        self._pending = pending
+        self._refresh_pending()
+        self._refresh_buttons()
+        self._set_status(f"已加入 {added} 个元素，共 {len(pending)} 个待组合")
+
+    def _on_selection_row(self, _row: int) -> None:
+        self._refresh_buttons()
+
+    def _on_remove_rows(self) -> None:
+        selected = {
+            self.selection_list.row(item) for item in self.selection_list.selectedItems()
+        }
+        self._pending = [
+            item
+            for index, item in enumerate(getattr(self, "_pending", []))
+            if index not in selected
+        ]
+        self._refresh_pending()
+        self._refresh_buttons()
+
+    def _on_make_group(self) -> None:
+        pending = list(getattr(self, "_pending", []))
+        if len(pending) < 2:
+            self._set_status("至少需要两个元素才能组合", warn=True)
+            return
+        group = self.board.make_group(pending, name=self.new_name_edit.text())
+        if group is None:
+            self._set_status("这些元素无法组成一个组合", warn=True)
+            return
+        self._pending = []
+        self.new_name_edit.clear()
+        self._apply(f"已组合 {len(self.board.group_all_members(group))} 个元素")
+
+    def _apply(self, message: str) -> None:
+        """Push the change out: repaint, mark the document dirty, refresh."""
+        self.refresh()
+        self._set_status(message)
+        self._canvas.document_changed.emit()
+        # One undo step for the whole edit, recorded through the canvas so it
+        # lands in the same history as every other document change.
+        self._canvas._record()
+        self._canvas.update()
+        self.changed.emit()
+
+    def _set_status(self, message: str, *, warn: bool = False) -> None:
+        self.status.setText(message)
+        if warn:
+            warn_surface(self.status, size=11)
+        else:
+            muted(self.status)
+
+
+def _is_text_element(item) -> bool:
+    from pcbart.artboard import TextElement
+
+    return isinstance(item, TextElement)
+
+
+def _element_kind_name(item) -> str:
+    """A short human label for one element, for the manager's lists."""
+    from pcbart.artboard import ImagePlacement
+
+    if isinstance(item, ImagePlacement):
+        import os
+
+        name = os.path.basename(item.path) or "图片"
+        # Elided rather than printed whole: a long source file name is the
+        # normal case -- 「立绘 缄默德克萨斯 幽兰秘辛.png」 -- and letting it
+        # through pushes the rest of the row out of the panel.
+        if len(name) > 22:
+            name = name[:11] + "…" + name[-9:]
+        tone = {"white": "·白", "black": "·黑"}.get(item.tone, "")
+        return f"图片 {name}{tone}"
+    if _is_text_element(item):
+        text = (item.text or "").strip() or "（空文字）"
+        if len(text) > 14:
+            text = text[:14] + "…"
+        return f"文字 {text}"
+    return str(getattr(item, "label", "元素"))
+
+
+_group_manager_panel = None
+
+
+def show_group_manager(main_window: QWidget):
+    """Open 组合管理 for ``main_window``'s canvas."""
+    global _group_manager_panel
+
+    canvas = main_window.design_canvas
+    panel, created = reusable_panel(
+        _group_manager_panel, main_window, lambda parent: GroupManagerPanel(parent, canvas)
+    )
+    _group_manager_panel = panel
+    if created:
+        panel.place_top_right()
+    else:
+        # Re-pointed on every open: a tab switch replaces the document, and a
+        # panel still bound to the previous board would edit the wrong one.
+        panel._canvas = canvas
+    panel.refresh()
+    panel.show()
+    panel.raise_()
+    return panel
+
+
+
 class ImagePropertyPanel(QWidget):
     """Step 2: properties of the selected image.
 
@@ -4809,6 +7800,9 @@ class ImagePropertyPanel(QWidget):
         self._placement = None
         self._layer_stack = None
         self._updating = False
+        self._run_key: str | None = None
+        """Which run of edits the last change belonged to; see
+        :meth:`edit_run_key`."""
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -4819,9 +7813,7 @@ class ImagePropertyPanel(QWidget):
         header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(6)
         title = QLabel("图片属性")
-        title.setStyleSheet(
-            f"color: {TEXT}; font-weight: 600; font-size: 13px;"
-        )
+        themed(title, lambda: f"color: {TEXT}; font-weight: 600; font-size: 13px;")
         header_layout.addWidget(title)
         header_layout.addStretch(1)
         close = QPushButton("×")
@@ -4833,7 +7825,7 @@ class ImagePropertyPanel(QWidget):
 
         self.name_label = QLabel("未选择")
         self.name_label.setWordWrap(True)
-        self.name_label.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        muted(self.name_label)
         layout.addWidget(self.name_label)
 
         position = section("位置", compact=True)
@@ -4906,7 +7898,7 @@ class ImagePropertyPanel(QWidget):
         layer_layout.addWidget(row("不透明度", self.opacity_slider))
         self.layer_note = QLabel()
         self.layer_note.setWordWrap(True)
-        self.layer_note.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        muted(self.layer_note)
         layer_layout.addWidget(self.layer_note)
         layout.addWidget(layer_group)
 
@@ -4960,7 +7952,37 @@ class ImagePropertyPanel(QWidget):
 
     def _emit(self) -> None:
         if not self._updating and self._placement is not None:
+            self._run_key = self._field_key()
             self.changed.emit()
+
+    def _field_key(self) -> str:
+        """Which field the current edit came from, for undo coalescing.
+
+        One key per control, so dragging the X spinbox merges into a single
+        undo step while a following edit to the width starts a new one. The
+        placement is part of the key too: the same field on a different object
+        must not continue the previous object's run.
+
+        The control is identified by its attribute name on this panel rather
+        than by its ``objectName``, which Qt leaves empty unless someone sets
+        it -- every field would otherwise share one key and a position edit
+        would merge with a size edit.
+        """
+        sender = self.sender()
+        field = "field"
+        for name, value in vars(self).items():
+            if value is sender:
+                field = name
+                break
+        return f"{id(self._placement)}:{field}"
+
+    def edit_run_key(self) -> str | None:
+        """The run key for the edit just reported, or ``None`` for a one-off.
+
+        Read by the window when :attr:`changed` fires; see
+        :meth:`pcbart.undo.UndoStack.record`.
+        """
+        return self._run_key
 
     # ------------------------------------------------------------ handlers
     #
@@ -5127,42 +8149,43 @@ class ProjectTabBar(QTabBar):
         self.setUsesScrollButtons(True)
         self.setElideMode(Qt.ElideRight)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.setStyleSheet(
-            f"""
-            QTabBar#ProjectTabBar {{
-                background: {WINDOW_BG};
-                border-bottom: 1px solid {BORDER};
-            }}
-            QTabBar#ProjectTabBar::tab {{
-                background: {PANEL_BG};
-                color: {MUTED};
-                border: 1px solid {BORDER};
-                border-bottom: none;
-                border-top-left-radius: 5px;
-                border-top-right-radius: 5px;
-                padding: 5px 8px;
-                margin: 3px 2px 0 0;
-                min-width: 86px;
-                max-width: 210px;
-            }}
-            QTabBar#ProjectTabBar::tab:selected {{
-                background: {PANEL_BG};
-                color: {TEXT};
-                font-weight: 600;
-                border-color: {ACCENT};
-                border-bottom: 2px solid {PANEL_BG};
-            }}
-            QTabBar#ProjectTabBar::tab:hover {{ color: {TEXT}; }}
-            QTabBar#ProjectTabBar::close-button {{
-                subcontrol-position: right;
-                margin: 2px;
-                padding: 1px;
-                border-radius: 3px;
-            }}
-            QTabBar#ProjectTabBar::close-button:hover {{
-                background: rgba(185, 28, 28, 0.14);
-            }}
-            """
+        themed(
+            self,
+            lambda: f"""
+                            QTabBar#ProjectTabBar {{
+                                background: {WINDOW_BG};
+                                border-bottom: 1px solid {BORDER};
+                            }}
+                            QTabBar#ProjectTabBar::tab {{
+                                background: {PANEL_BG};
+                                color: {MUTED};
+                                border: 1px solid {BORDER};
+                                border-bottom: none;
+                                border-top-left-radius: 5px;
+                                border-top-right-radius: 5px;
+                                padding: 5px 8px;
+                                margin: 3px 2px 0 0;
+                                min-width: 86px;
+                                max-width: 210px;
+                            }}
+                            QTabBar#ProjectTabBar::tab:selected {{
+                                background: {PANEL_BG};
+                                color: {TEXT};
+                                font-weight: 600;
+                                border-color: {ACCENT};
+                                border-bottom: 2px solid {PANEL_BG};
+                            }}
+                            QTabBar#ProjectTabBar::tab:hover {{ color: {TEXT}; }}
+                            QTabBar#ProjectTabBar::close-button {{
+                                subcontrol-position: right;
+                                margin: 2px;
+                                padding: 1px;
+                                border-radius: 3px;
+                            }}
+                            QTabBar#ProjectTabBar::close-button:hover {{
+                                background: rgba(185, 28, 28, 0.14);
+                            }}
+            """,
         )
         self.tabBarClicked.connect(self._on_clicked)
         self.tabMoved.connect(self.moved.emit)
@@ -5217,17 +8240,18 @@ class ProjectTabBar(QTabBar):
         button.setAutoRaise(True)
         button.setFixedSize(16, 16)
         button.setFocusPolicy(Qt.NoFocus)
-        button.setStyleSheet(
-            f"""
-            QToolButton#TabClose {{
-                background: transparent; border: none; color: {MUTED};
-                font-size: 10px; padding: 0;
-            }}
-            QToolButton#TabClose:hover {{
-                color: {DANGER}; background: rgba(185, 28, 28, 0.12);
-                border-radius: 3px;
-            }}
-            """
+        themed(
+            button,
+            lambda: f"""
+                            QToolButton#TabClose {{
+                                background: transparent; border: none; color: {MUTED};
+                                font-size: 10px; padding: 0;
+                            }}
+                            QToolButton#TabClose:hover {{
+                                color: {DANGER}; background: rgba(185, 28, 28, 0.12);
+                                border-radius: 3px;
+                            }}
+            """,
         )
         button.clicked.connect(lambda _=False, source=button: self._close_tab(source))
         return button
@@ -5345,6 +8369,11 @@ class MainWindow(QMainWindow):
             canvas = getattr(self, "design_canvas", None)
             board = None if canvas is None else canvas.board
             found = Workspace(board)
+            if canvas is not None:
+                # The canvas started recording before this workspace existed.
+                # Handing its stack to the opening project keeps one history
+                # per board instead of one the tab switch would abandon.
+                found.active.adopt_history(canvas.history)
             self._workspace = found
         return found
 
@@ -5459,9 +8488,10 @@ class DraftRow(QPushButton):
         top_layout.setSpacing(4)
 
         self.name_label = QLabel(name)
-        self.name_label.setStyleSheet(
-            f"color: {TEXT}; font-weight: {'600' if current else '400'};"
-            "background: transparent; border: none;"
+        themed(
+            self.name_label,
+            lambda: f"color: {TEXT}; font-weight: {'600' if current else '400'};"
+            "background: transparent; border: none;",
         )
         self.name_label.setWordWrap(False)
         self.name_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
@@ -5470,17 +8500,18 @@ class DraftRow(QPushButton):
         self.name_edit = RenameEdit(name)
         self.name_edit.setObjectName("DraftRenameEdit")
         self.name_edit.setToolTip("输入新名字后按回车；按 Esc 取消")
-        self.name_edit.setStyleSheet(
-            f"""
-            QLineEdit#DraftRenameEdit {{
-                background: {PANEL_BG};
-                color: {TEXT};
-                border: 1px solid {ACCENT};
-                border-radius: 3px;
-                padding: 1px 3px;
-                font-weight: 600;
-            }}
-            """
+        themed(
+            self.name_edit,
+            lambda: f"""
+                            QLineEdit#DraftRenameEdit {{
+                                background: {PANEL_BG};
+                                color: {TEXT};
+                                border: 1px solid {ACCENT};
+                                border-radius: 3px;
+                                padding: 1px 3px;
+                                font-weight: 600;
+                            }}
+            """,
         )
         self.name_edit.setVisible(False)
         top_layout.addWidget(self.name_edit, 1)
@@ -5492,39 +8523,42 @@ class DraftRow(QPushButton):
         self.rename_button.setCursor(Qt.PointingHandCursor)
         self.rename_button.setFixedSize(20, 18)
         self.rename_button.setFocusPolicy(Qt.NoFocus)
-        self.rename_button.setStyleSheet(
-            f"""
-            QToolButton#DraftRenameButton {{
-                background: transparent; border: none; color: {MUTED};
-                font-size: 12px;
-            }}
-            QToolButton#DraftRenameButton:hover {{
-                color: {ACCENT}; background: rgba(37, 99, 235, 0.10);
-                border-radius: 3px;
-            }}
-            """
+        themed(
+            self.rename_button,
+            lambda: f"""
+                            QToolButton#DraftRenameButton {{
+                                background: transparent; border: none; color: {MUTED};
+                                font-size: 12px;
+                            }}
+                            QToolButton#DraftRenameButton:hover {{
+                                color: {ACCENT}; background: rgba(37, 99, 235, 0.10);
+                                border-radius: 3px;
+                            }}
+            """,
         )
         self.rename_button.clicked.connect(self.edit_name)
         top_layout.addWidget(self.rename_button, 0, Qt.AlignTop)
         layout.addWidget(top)
 
         self.subtitle_label = QLabel(subtitle)
-        self.subtitle_label.setStyleSheet(
-            f"color: {SUCCESS if current else MUTED}; font-size: 10px;"
-            "background: transparent; border: none;"
+        themed(
+            self.subtitle_label,
+            lambda: f"color: {SUCCESS if current else MUTED}; font-size: 10px;"
+            "background: transparent; border: none;",
         )
         layout.addWidget(self.subtitle_label)
 
-        self.setStyleSheet(
-            f"""
-            QPushButton#DraftRow {{
-                background: {"#eef4ff" if current else PANEL_BG};
-                border: 1px solid {"#bcd3f5" if current else BORDER};
-                border-radius: 4px;
-                text-align: left;
-            }}
-            QPushButton#DraftRow:hover {{ border-color: {ACCENT}; }}
-            """
+        themed(
+            self,
+            lambda: f"""
+                            QPushButton#DraftRow {{
+                                background: {"#eef4ff" if current else PANEL_BG};
+                                border: 1px solid {"#bcd3f5" if current else BORDER};
+                                border-radius: 4px;
+                                text-align: left;
+                            }}
+                            QPushButton#DraftRow:hover {{ border-color: {ACCENT}; }}
+            """,
         )
 
         self.name_edit.returnPressed.connect(self._commit)
@@ -5603,7 +8637,7 @@ class DraftPanel(QWidget):
         layout.setSpacing(6)
 
         title = QLabel("草稿")
-        title.setStyleSheet(f"color: {TEXT}; font-weight: 600; font-size: 13px;")
+        themed(title, lambda: f"color: {TEXT}; font-weight: 600; font-size: 13px;")
         layout.addWidget(title)
 
         self.state_label = QLabel()
@@ -5662,12 +8696,12 @@ class DraftPanel(QWidget):
 
         self.empty_label = QLabel("还没有草稿。点【保存草稿】存下当前设计。")
         self.empty_label.setWordWrap(True)
-        self.empty_label.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        muted(self.empty_label)
         layout.addWidget(self.empty_label)
 
         hint = QLabel("单击打开；点行末的 ✎ 改名，右键可以删除。")
         hint.setWordWrap(True)
-        hint.setStyleSheet(f"color: {MUTED}; font-size: 10px;")
+        muted(hint, size=10)
         layout.addWidget(hint)
 
         self.refresh()
@@ -5713,20 +8747,18 @@ class DraftPanel(QWidget):
                 if self._path
                 else "\n点【保存草稿】存进下面的列表"
             )
-            self.state_label.setStyleSheet(
-                f"background: #fff8e6; color: {WARNING};"
-                f"border: 1px solid #f0d9a8; border-radius: 4px;"
-                f"padding: 6px 8px; font-size: 11px;"
-            )
+            warn_surface(self.state_label, size=11, padding="6px 8px")
         else:
             if self._path:
                 text = f"✓ 已保存：{Path(self._path).stem}"
             else:
                 text = "新文档，暂无修改"
-            self.state_label.setStyleSheet(
-                f"background: {PANEL_BG}; color: {SUCCESS if self._path else MUTED};"
-                f"border: 1px solid {BORDER}; border-radius: 4px;"
-                f"padding: 6px 8px; font-size: 11px;"
+            themed(
+                self.state_label,
+                lambda: f"background: {PANEL_BG};"
+                f" color: {SUCCESS if self._path else MUTED};"
+                f" border: 1px solid {BORDER}; border-radius: 4px;"
+                f" padding: 6px 8px; font-size: 11px;",
             )
         self.state_label.setText(text)
 
@@ -5874,6 +8906,9 @@ def _show_project(window, project: Project, *, message: str = "") -> None:
     canvas.board = project.board
     canvas.selected = None
     canvas.selection_changed.emit(None)
+    # The board's history comes with the board. Sharing one stack across tabs
+    # would let Ctrl+Z in this tab undo an edit made in another one.
+    canvas.set_history(project.history)
     canvas.set_view_state(project.view)
 
     window.board = project.board
@@ -5884,9 +8919,24 @@ def _show_project(window, project: Project, *, message: str = "") -> None:
     # The board-setup panel holds the old board, so it is closed rather than
     # left editing a document that is no longer active.
     _drop_board_panel(window)
-    preprocess = _preprocess_panel
-    if preprocess is not None and preprocess.parentWidget() is window:
-        preprocess._refresh_board_note()
+    # 模板内容 is re-pointed instead of closed: it is a pane the user works in
+    # alongside the canvas, and having it vanish on every tab switch would make
+    # comparing two cards' wording impossible. Re-pointing is what keeps it
+    # editing the board on screen rather than the one it was opened for.
+    content = live_panel("_template_content_panel")
+    if content is not None:
+        try:
+            if content.parentWidget() is window:
+                content.set_board(project.board)
+        except RuntimeError:
+            pass
+    preprocess = live_panel("_preprocess_panel")
+    if preprocess is not None:
+        try:
+            if preprocess.parentWidget() is window:
+                preprocess._refresh_board_note()
+        except RuntimeError:
+            pass
 
     refresh_project_tabs(window)
     refresh_draft_panel(window)
@@ -6283,8 +9333,15 @@ def delete_draft(window, path: str) -> bool:
 def _drop_board_panel(window) -> None:
     """Close the board-setup panel, which holds a reference to the old board."""
     global _board_panel
-    panel = _board_panel
-    if panel is not None and panel.parentWidget() is window:
+    panel = live_panel("_board_panel")
+    if panel is None:
+        _board_panel = None
+        return
+    try:
+        mine = panel.parentWidget() is window
+    except RuntimeError:
+        mine = False
+    if mine:
         panel.hide()
         panel.deleteLater()
         _board_panel = None
@@ -6423,6 +9480,88 @@ def show_about(main_window: QWidget) -> None:
     )
 
 
+#: How the user answers :func:`ask_print_kind`.
+PRINT_NORMAL = "normal"
+PRINT_COLOR = "color"
+
+
+def ask_print_kind(main_window: QWidget, board, parent: QWidget | None = None):
+    """Ask whether this board is a **普通打板** or a **彩色丝印打板**.
+
+    Returns :data:`PRINT_NORMAL`, :data:`PRINT_COLOR`, or ``None`` if the user
+    cancelled.
+
+    ⚠️ **This is not a cosmetic choice -- the two produce different boards.**
+    A picture on the canvas (an unprocessed import, or the card's own 二维码 /
+    条形码 / 职业图标 / 阵营 logo) reaches a board only through the EDA's
+    colour-silkscreen export. Measured: on a card with two pictures, a plain
+    Gerber export left both silkscreen layers with **zero** draw commands.
+
+    So the answer decides how the artwork is written:
+
+    * 普通打板 traces every picture into filled regions. The Gerber set then
+      carries the artwork, and no colour job is involved.
+    * 彩色丝印打板 keeps the pictures, and the EDA writes the colour files.
+
+    Only asked when there is something to decide: a board with no pictures
+    exports straight through, so the common case stays one click.
+    """
+    from pcbart.export import picture_placements
+
+    pictures = picture_placements(board)
+    if not pictures:
+        return PRINT_NORMAL
+
+    box = QMessageBox(parent or main_window)
+    box.setWindowTitle("导出方式")
+    box.setIcon(QMessageBox.Question)
+    box.setText(f"这张板上有 {len(pictures)} 张图片，要按哪种方式导出？")
+    box.setInformativeText(
+        "普通打板：图片会被描成填充图形，随普通 Gerber 一起生产，不开彩印。\n"
+        "彩色丝印打板：保留原图配色，由嘉立创 EDA 出彩色丝印文件。\n\n"
+        "⚠️ 两者不是同一个东西：图片不会出现在普通 Gerber 里，"
+        "选错会让这些图案在成品上直接消失。"
+    )
+    normal = box.addButton("普通打板", QMessageBox.AcceptRole)
+    color = box.addButton("彩色丝印打板", QMessageBox.AcceptRole)
+    box.addButton("取消", QMessageBox.RejectRole)
+    box.setDefaultButton(color)
+    box.exec()
+    clicked = box.clickedButton()
+    if clicked is normal:
+        return PRINT_NORMAL
+    if clicked is color:
+        return PRINT_COLOR
+    return None
+
+
+def _confirm_plain_gerber_for_pictures(
+    main_window: QWidget, count: int
+) -> bool:
+    """Warn that a plain Gerber will trace the board's pictures. ``True`` to go on.
+
+    Its own function so tests can answer it without a dialog; see
+    :func:`ask_print_kind` for why the distinction matters at all.
+    """
+    box = QMessageBox(main_window)
+    box.setWindowTitle("这是普通 Gerber")
+    box.setIcon(QMessageBox.Information)
+    box.setText(
+        f"这张板上有 {count} 张图片，它们会按普通 Gerber 描成填充图形。"
+    )
+    box.setInformativeText(
+        "要出彩色丝印下单文件，请改用【另存为工程】导出 .epro2，"
+        "再在嘉立创 EDA 里用「一键生成」出彩印包 —— "
+        "彩色数据只能由 EDA 自己编码。\n\n"
+        "继续导出的是普通打板文件，图片会以单色图形生产。"
+    )
+    box.addButton("继续导出普通 Gerber", QMessageBox.AcceptRole)
+    cancel = box.addButton("取消", QMessageBox.RejectRole)
+    box.setDefaultButton(cancel)
+    box.exec()
+    return box.clickedButton() is not cancel
+
+
 def export_project(main_window: QWidget, parent: QWidget | None = None) -> str | None:
     """【文件 → 另存为工程】: ask where to save, write the board, report it.
 
@@ -6440,6 +9579,14 @@ def export_project(main_window: QWidget, parent: QWidget | None = None) -> str |
 
     project = main_window.active_project
     project.board = canvas.board
+
+    # Which kind of order this is decides how the pictures are written, and
+    # getting it wrong makes them vanish from the finished board -- so it is
+    # asked before the file dialog, not after the fact.
+    kind = ask_print_kind(main_window, canvas.board, parent)
+    if kind is None:
+        return None
+
     # Reopening the dialog at the last target is what makes the second save of
     # a board cheap; the name follows the board unless the user set one.
     if project.project_path:
@@ -6458,7 +9605,9 @@ def export_project(main_window: QWidget, parent: QWidget | None = None) -> str |
         path += ".epro2"
 
     try:
-        report = export_design(canvas.board, path)
+        report = export_design(
+            canvas.board, path, color_print=(kind == PRINT_COLOR)
+        )
     except ValueError as exc:
         QMessageBox.warning(parent or main_window, "无法导出", str(exc))
         return None
@@ -6479,8 +9628,17 @@ def export_project(main_window: QWidget, parent: QWidget | None = None) -> str |
     refresh_project_tabs(main_window)
     refresh_draft_panel(main_window)
 
-    # Say plainly that only the board went into the file. Reporting success
-    # without that would imply the artwork is in there too.
+    # ⚠️ **The dialog says only that the save worked.** The user asked for that
+    # in as many words: 「只提示工程保存完成」. It used to append the whole writer
+    # report, which on a card with one misplaced illustration grew to a page of
+    # near-identical lines and buried the sentence the user actually needed.
+    #
+    # The report is not thrown away -- it goes to the status bar, where it is
+    # readable and dismissible instead of blocking. It still has to be said
+    # somewhere: its entries include 「图片已移出立绘区，本层没有内容可印」, i.e. a
+    # picture that will not appear on the board at all. Dropping that would turn
+    # a warning into silent data loss, which is the failure this project keeps
+    # designing against.
     note = (
         f"已保存工程，板框 {report['width_mm']:.1f} × {report['height_mm']:.1f} mm"
         f"，{report['vertices']} 个顶点。"
@@ -6488,11 +9646,15 @@ def export_project(main_window: QWidget, parent: QWidget | None = None) -> str |
     detail = str(report["note"]) if report["artwork_placements"] else ""
     QMessageBox.information(
         parent or main_window,
-        "另存为工程完成",
-        f"{note}\n\n{Path(written).name}"
-        + (f"\n\n说明：{detail}" if detail else "")
-        + ("\n\n当前编辑状态已同时存进草稿库。" if stashed else ""),
+        "工程保存完成",
+        f"已保存：{Path(written).name}",
     )
+    summary = note
+    if detail:
+        summary += f"　·　{detail}"
+    if stashed:
+        summary += "　·　当前编辑状态已存进草稿库"
+    main_window.statusBar().showMessage(summary)
     return written
 
 
@@ -6510,12 +9672,21 @@ def export_gerber_project(main_window: QWidget) -> str | None:
         QMessageBox.information(main_window, "暂不可用", "主窗口尚未准备好设计画布。")
         return None
 
-    from pcbart.export import default_title
+    from pcbart.export import default_title, picture_placements
     from pcbart.gerber import DEFAULT_PREFIX, export_gerber_archive
     from pcbart.paths import default_output_dir
 
     project = main_window.active_project
     project.board = canvas.board
+
+    # ⚠️ **A Gerber has no picture primitive.** This export always traces, so
+    # the artwork does print -- but if the user meant to order colour, this
+    # file is not that order, and saying so now is cheaper than a board that
+    # comes back without the colour they designed.
+    if picture_placements(canvas.board) and not _confirm_plain_gerber_for_pictures(
+        main_window, len(picture_placements(canvas.board))
+    ):
+        return None
 
     # Default to a folder named after the design, beside the draft if there is
     # one -- so the two halves of "my work" end up next to each other instead
@@ -6586,10 +9757,12 @@ SOFT_SHADING_KERNEL_SHARE = 0.0065
 
 
 #: Keyboard shortcuts for the 编辑 menu, following the conventions an EDA tool
-#: uses. Only operations this tool actually has appear -- there is no undo
-#: stack and no multi-selection, so ``Ctrl+Z`` and ``Ctrl+A`` are absent rather
-#: than bound to something that would do nothing.
+#: uses. Only operations this tool actually has appear -- there is no redo stack
+#: and no multi-selection, so ``Ctrl+Y`` and ``Ctrl+A`` are absent rather than
+#: bound to something that would do nothing.
 EDIT_ACTIONS: tuple[tuple[str, str, str], ...] = (
+    ("撤销", "Ctrl+Z", "undo"),
+    ("-", "", ""),
     ("复制", "Ctrl+C", "copy_selection"),
     ("剪切", "Ctrl+X", "cut_selection"),
     ("粘贴", "Ctrl+V", "paste"),
@@ -6600,6 +9773,10 @@ EDIT_ACTIONS: tuple[tuple[str, str, str], ...] = (
     ("垂直翻转", "", "flip_vertical"),
     ("居中", "", "centre_selection"),
     ("按板框缩放", "", "fit_to_board"),
+    ("-", "", ""),
+    ("组合所选…", "Ctrl+G", "group_selection"),
+    ("取消组合", "Ctrl+Shift+G", "ungroup_selection"),
+    ("组合管理…", "", "manage_groups"),
 )
 
 #: Entries that need something selected, and so are greyed out otherwise.
@@ -6617,6 +9794,38 @@ EDIT_NEEDS_SELECTION = frozenset(
 )
 
 
+def _group_selected(window: QWidget, canvas) -> None:
+    """组合所选…: ask for a name, then group.
+
+    The name is asked for up front rather than left to 组合管理 afterwards,
+    because a group is what the user will see in the layer list and in the
+    editor -- naming it at the moment it is created is when they know what it
+    is. Cancelling the prompt cancels the whole operation: a group appearing
+    after the user pressed 取消 would be the tool acting on a withdrawn
+    instruction.
+    """
+    from PySide6.QtWidgets import QInputDialog
+
+    chosen = canvas.selection_set()
+    if len(chosen) < 2:
+        QMessageBox.information(
+            window,
+            "无法组合",
+            "请先在画布上选中至少两个元素。\n"
+            "Ctrl+单击＝逐个加选，Shift+单击＝选中一段范围。",
+        )
+        return
+
+    default = f"组合 {len(canvas.board.groups) + 1}"
+    name, accepted = QInputDialog.getText(
+        window, "组合所选", "给这个组合起个名字：", text=default
+    )
+    if not accepted:
+        return
+    if canvas.group_selection(name):
+        show_group_manager(window).refresh()
+
+
 def _wire_edit_actions(
     window: QMainWindow, actions_by_name: dict, canvas, on_fit_requested
 ) -> None:
@@ -6628,6 +9837,7 @@ def _wire_edit_actions(
     wherever focus is rather than only while the canvas has it.
     """
     operations = {
+        "undo": canvas.undo,
         "copy_selection": canvas.copy_selection,
         "cut_selection": canvas.cut_selection,
         "paste": canvas.paste,
@@ -6638,10 +9848,16 @@ def _wire_edit_actions(
         "flip_vertical": lambda: canvas.flip_selection(horizontal=False),
         "centre_selection": canvas.centre_selection,
         "fit_to_board": on_fit_requested,
+        "group_selection": lambda: _group_selected(window, canvas),
+        "ungroup_selection": canvas.ungroup_selection,
+        "manage_groups": lambda: show_group_manager(window),
     }
 
     actions: dict[str, QAction] = {}
     for label, shortcut, operation in EDIT_ACTIONS:
+        if label == "-":
+            # A separator in the menu, skipped here: it carries no action.
+            continue
         action = actions_by_name[label]
         action.triggered.connect(operations[operation])
         if shortcut:
@@ -6659,17 +9875,52 @@ def _wire_edit_actions(
         for label in EDIT_NEEDS_SELECTION:
             actions[label].setEnabled(has_selection)
         actions["粘贴"].setEnabled(canvas.clipboard_size > 0)
+        # 组合 needs *two* objects, so it cannot ride on EDIT_NEEDS_SELECTION --
+        # a single object satisfies that set and would leave the entry looking
+        # available for an operation that would then do nothing.
+        actions["组合所选…"].setEnabled(canvas.can_group())
+        # 取消组合 only means something when something selected is actually in
+        # a group. Offering it otherwise invites a click that reports nothing.
+        actions["取消组合"].setEnabled(
+            any(canvas.board.group_of(item) for item in canvas.selection_set())
+        )
+        actions["组合管理…"].setEnabled(bool(canvas.board.groups))
+        # Undo is available on its own terms: it is about the document's
+        # history, not about what is selected. A greyed-out entry is how the
+        # user knows they have reached the beginning.
+        actions["撤销"].setEnabled(canvas.can_undo())
 
     canvas.selection_changed.connect(sync_enabled)
     # Copying changes neither the selection nor the document, but it is what
     # makes 粘贴 possible, so it has to refresh the enabled state too.
     canvas.clipboard_changed.connect(sync_enabled)
+    # Every edit changes whether there is anything to undo, and undo itself
+    # changes it again.
+    canvas.history_changed.connect(sync_enabled)
     # A paste or a delete changes what is on the board without moving the
     # selection, so the layer/draft panes are told separately.
     canvas.document_changed.connect(lambda: refresh_workspace_state(window))
     canvas.fit_to_board_requested.connect(on_fit_requested)
     canvas.reset_view_requested.connect(canvas.fit_view)
     sync_enabled()
+
+
+# The board templates this build knows about. Registered once when the module
+# loads so the board panel's 套用模板 entry has something to list.
+badge_card.register()
+
+
+def _is_badge_board(board: ArtBoard) -> bool:
+    """Whether ``board`` is a 通行证 card, so 模板内容 has something to edit.
+
+    Asked of the outline rather than of a flag, for the same reason the canvas
+    asks it that way: a board that stops being a card stops offering the entry
+    without anything having to remember to clear a flag.
+    """
+    return (
+        board.outline.shape == OutlineShape.TEMPLATE
+        and badge_card.is_badge_template(board.outline.template or "")
+    )
 
 
 def build_window() -> QMainWindow:
@@ -6711,6 +9962,7 @@ def build_window() -> QMainWindow:
             "打开图片…",
             "图像预处理…",
             "板框设置…",
+            "模板内容…",
             "-",
             "退出",
         ],
@@ -6718,6 +9970,8 @@ def build_window() -> QMainWindow:
     add_items(
         menu.addMenu("编辑"),
         [
+            "撤销",
+            "-",
             "复制",
             "剪切",
             "粘贴",
@@ -6730,12 +9984,19 @@ def build_window() -> QMainWindow:
             "居中",
             "按板框缩放",
             "-",
+            "组合所选…",
+            "取消组合",
+            "组合管理…",
+            "-",
             "适应窗口",
             "放大",
             "缩小",
         ],
     )
-    add_items(menu.addMenu("视图"), ["图层…"])
+    # 界面设置 sits under 视图 with the other "how it looks" commands rather
+    # than in 编辑, which is for editing the *board*. A theme is a property of
+    # the application, and 视图 is where a user looks for it.
+    add_items(menu.addMenu("视图"), ["图层…", "-", "界面设置…"])
     add_items(menu.addMenu("帮助"), ["关于"])
 
     new_project_action = actions_by_name["新建板子"]
@@ -6748,52 +10009,45 @@ def build_window() -> QMainWindow:
     open_image_action = actions_by_name["打开图片…"]
     preprocess_action = actions_by_name["图像预处理…"]
     board_action = actions_by_name["板框设置…"]
+    content_action = actions_by_name["模板内容…"]
     layers_action = actions_by_name["图层…"]
     fit_action = actions_by_name["适应窗口"]
     zoom_in_action = actions_by_name["放大"]
     zoom_out_action = actions_by_name["缩小"]
+    settings_action = actions_by_name["界面设置…"]
 
     toolbar = QToolBar("主工具栏")
     toolbar.setMovable(False)
     toolbar.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-    toolbar.setStyleSheet(
-        f"""
-        QToolBar {{
-            background: {PANEL_BG};
-            border-bottom: 1px solid {BORDER};
-            padding: 4px 8px;
-            spacing: 4px;
-        }}
-        QToolButton {{
-            padding: 5px 10px;
-            border: 1px solid transparent;
-            border-radius: 3px;
-        }}
-        QToolButton:hover {{ border-color: {BORDER}; }}
-        """
-    )
-    style = window.style()
+    # The toolbar carries no stylesheet of its own any more: its look comes
+    # from the application-wide Material sheet (tools/qt_theme.py), which is
+    # what lets it follow a theme switch. A local sheet here would keep the old
+    # colours.
     toolbar_by_name: dict[str, QAction] = {}
     # 重新生成 and 校验 are gone: nothing regenerates yet (export writes
     # straight from the document) and there is no validator to run. They were
     # the two most obviously dead buttons on the bar.
-    for text, icon in [
-        ("打开图片", QStyleIcon.SP_DialogOpenButton),
-        ("图像预处理", QStyleIcon.SP_FileDialogDetailedView),
-        ("板框设置", QStyleIcon.SP_FileDialogInfoView),
-        ("图层", QStyleIcon.SP_FileDialogListView),
-        ("适应窗口", QStyleIcon.SP_FileDialogContentsView),
+    #
+    # The icons are Iconoir, drawn from pcbart.ui_icons rather than taken from
+    # the platform style. The native ones are a fixed light-theme set: on a
+    # dark panel they read as muddy grey shapes, and they cannot be recoloured.
+    for text, icon_name in [
+        ("打开图片", "open_image"),
+        ("图像预处理", "preprocess"),
+        ("板框设置", "board_setup"),
+        ("图层", "layers"),
+        ("适应窗口", "fit_window"),
     ]:
-        action = QAction(style.standardIcon(icon), text, window)
+        action = QAction(qt_theme_icon(icon_name, TEXT, size=18), text, window)
         toolbar_by_name[text] = action
         toolbar.addAction(action)
     toolbar.addSeparator()
     export_toolbar_action = QAction(
-        style.standardIcon(QStyleIcon.SP_DialogSaveButton), "另存为工程", window
+        qt_theme_icon("save_project", TEXT, size=18), "另存为工程", window
     )
     toolbar.addAction(export_toolbar_action)
     gerber_toolbar_action = QAction(
-        style.standardIcon(QStyleIcon.SP_DriveFDIcon), "另存为下单文件", window
+        qt_theme_icon("export_gerber", TEXT, size=18), "另存为下单文件", window
     )
     toolbar.addAction(gerber_toolbar_action)
     window.addToolBar(toolbar)
@@ -6806,13 +10060,14 @@ def build_window() -> QMainWindow:
         "点击图片可选中，选中后拖动移动、拖四边小三角改尺寸。"
     )
     banner.setWordWrap(True)
-    banner.setStyleSheet(
-        f"""
-        background: #fff8e6;
-        color: {WARNING};
-        border-bottom: 1px solid #f0d9a8;
-        padding: 6px 12px;
-        """
+    themed(
+        banner,
+        lambda: f"""
+                    background: {WARNING_BG};
+                    color: {WARNING_FG};
+                    border-bottom: 1px solid {WARNING_EDGE};
+                    padding: 6px 12px;
+        """,
     )
     window._banner = banner
 
@@ -6833,7 +10088,13 @@ def build_window() -> QMainWindow:
     def on_selection(placement) -> None:
         # The scroll areas are toggled, not the panes inside them: hiding a
         # scroll area's widget leaves the empty frame behind.
-        if placement is None:
+        #
+        # ⚠️ Only *artwork* opens the image inspector. A text line or a cutout
+        # is not a picture -- it has no file, no aspect ratio and no opacity --
+        # and feeding one to the inspector crashed on the first attribute it
+        # read. They are edited in 模板内容 instead, which is also where their
+        # own panel lives, so the dock falls back to the layer list.
+        if placement is None or not isinstance(placement, ImagePlacement):
             inspector_area.setVisible(False)
             layer_pane.refresh()
             layer_area.setVisible(True)
@@ -6844,6 +10105,10 @@ def build_window() -> QMainWindow:
 
     def on_inspector_changed() -> None:
         canvas.update()
+        # The property pane edits the same placements the canvas draws, so its
+        # changes belong in the same undo history. Keyed by field so a spinbox
+        # drag or a typed number is one step rather than one per increment.
+        canvas.record_external_change(inspector.edit_run_key())
 
     def on_inspector_closed() -> None:
         canvas.selected = None
@@ -6851,24 +10116,24 @@ def build_window() -> QMainWindow:
         canvas.update()
 
     def on_fit_requested() -> None:
+        board = canvas.board
         selected = inspector._placement
-        fitted = canvas.board.fit_image_to_board(margin_mm=1.0)
-        canvas.board = fitted
-        # fit_image_to_board returns copies, so the inspector's object is no
-        # longer the one on the board; the selection is re-pointed rather than
-        # left holding a stale placement that edits would no longer reach.
-        matching = next(
-            (
-                item
-                for item in fitted.placements
-                if selected is not None
-                and (item.path, item.layer) == (selected.path, selected.layer)
-            ),
-            fitted.image,
-        )
-        if matching is not None:
-            inspector.set_placement(matching)
-            canvas.selected = matching
+        fitted = board.fit_image_to_board(margin_mm=1.0)
+        if fitted is board:
+            # Nothing to do: the artwork already fits.
+            return
+        # Applied into the live board rather than swapped for the returned copy.
+        # The undo history, the layer panel and the board-setup panel all hold
+        # the board object, so replacing it would leave every one of them
+        # editing a document no longer on screen.
+        apply_board_dict(board, board_to_dict(fitted))
+        # The placements keep their identity through that apply, so the
+        # inspector and the selection stay valid and nothing has to be
+        # re-pointed.
+        if selected is not None:
+            inspector.set_placement(selected)
+        canvas.record_external_change()
+        canvas.placement_changed.emit()
         canvas.update()
 
     def on_placement_changed() -> None:
@@ -6965,20 +10230,21 @@ def build_window() -> QMainWindow:
     new_tab_button.setCursor(Qt.PointingHandCursor)
     new_tab_button.setFixedSize(26, 24)
     new_tab_button.setFocusPolicy(Qt.NoFocus)
-    new_tab_button.setStyleSheet(
-        f"""
-        QToolButton#NewProjectTab {{
-            background: {PANEL_BG};
-            color: {TEXT};
-            border: 1px solid {BORDER};
-            border-radius: 4px;
-            font-size: 14px;
-            padding-bottom: 2px;
-        }}
-        QToolButton#NewProjectTab:hover {{
-            border-color: {ACCENT}; color: {ACCENT};
-        }}
-        """
+    themed(
+        new_tab_button,
+        lambda: f"""
+                    QToolButton#NewProjectTab {{
+                        background: {PANEL_BG};
+                        color: {TEXT};
+                        border: 1px solid {BORDER};
+                        border-radius: 4px;
+                        font-size: 14px;
+                        padding-bottom: 2px;
+                    }}
+                    QToolButton#NewProjectTab:hover {{
+                        border-color: {ACCENT}; color: {ACCENT};
+                    }}
+        """,
     )
     tab_row = QWidget()
     tab_row.setObjectName("ProjectTabRow")
@@ -6992,13 +10258,14 @@ def build_window() -> QMainWindow:
     # them would push the ＋ to the far edge, where it reads as belonging to
     # the window rather than to the tabs.
     tab_layout.addStretch(1)
-    tab_row.setStyleSheet(
-        f"""
-        QWidget#ProjectTabRow {{
-            background: {WINDOW_BG};
-            border-bottom: 1px solid {BORDER};
-        }}
-        """
+    themed(
+        tab_row,
+        lambda: f"""
+                    QWidget#ProjectTabRow {{
+                        background: {WINDOW_BG};
+                        border-bottom: 1px solid {BORDER};
+                    }}
+        """,
     )
 
     central = QWidget()
@@ -7018,6 +10285,20 @@ def build_window() -> QMainWindow:
         action.triggered.connect(lambda: show_preprocess(window))
     for action in (board_action, toolbar_by_name["板框设置"]):
         action.triggered.connect(lambda: show_board_setup(window))
+    # 模板内容 edits the current board's text and cutouts, so it is enabled
+    # only while a template is applied -- an empty list of text would be a
+    # panel of disabled controls.
+    def _open_template_content() -> None:
+        open_template_content(window)
+
+    content_action.triggered.connect(_open_template_content)
+    # ⚠️ **Always enabled.** The first version disabled this until the board was
+    # already a 通行证 card, and the result was a grey menu entry that reads as
+    # "this has not been built" -- the user reported exactly that. A control
+    # that cannot act yet is better off opening and saying why than sitting
+    # there dead, so the panel explains the situation and offers the one action
+    # that fixes it.
+    content_action.setEnabled(True)
     for action in (layers_action, toolbar_by_name["图层"]):
         action.triggered.connect(lambda: show_layers(window))
     toolbar_by_name["适应窗口"].triggered.connect(canvas.fit_view)
@@ -7073,9 +10354,16 @@ def build_window() -> QMainWindow:
         lambda: show_preprocess(window).drop_zone.browse()
     )
     about_action.triggered.connect(lambda: show_about(window))
+    settings_action.triggered.connect(lambda: show_settings(window))
+
+    # The settings panel searches up the parent chain for this, so it is bound
+    # per window rather than being a module function: the panel must switch the
+    # window it belongs to, and a second window would otherwise recolour the
+    # wrong one.
+    window.apply_colour_scheme = lambda scheme: apply_colour_scheme(window, scheme)
 
     status = window.statusBar()
-    status.setStyleSheet(f"background: {PANEL_BG}; color: {MUTED};")
+    themed(status, lambda: f"background: {PANEL_BG}; color: {MUTED};")
     status.showMessage("就绪　·　尚未载入图片　·　点击「打开图片」开始")
 
     # The draft starts unnamed and empty, so the first save has nothing to
@@ -7097,7 +10385,116 @@ def build_window() -> QMainWindow:
     window._draft_timer = draft_timer
     refresh_workspace_state(window)
 
+    # The theme sheet is applied to the *window* rather than to the
+    # application, because an application-level sheet forces Qt back to its
+    # built-in style and throws the custom proxy away -- see
+    # ``tools.qt_theme.apply_scheme``. A window built after startup therefore
+    # has to be given the sheet here; one built before it is covered by
+    # ``apply_scheme`` walking the top-level widgets.
+    style_window(window, current_scheme())
+
     return window
+
+
+def apply_colour_scheme(window, scheme):
+    """Recolour the running window in place. Returns the same window.
+
+    **Nothing is rebuilt, closed or restarted.** The window keeps every open
+    board, every panel that is open stays open, and the selection, scroll
+    position and zoom are exactly where they were -- the user is looking at
+    these while they drag a colour around, and a switch that recreated any of
+    them would move the thing they are looking at.
+
+    Three things have to happen for the colours to actually change:
+
+    1. **The module palette is re-bound** (:func:`set_palette`), so anything
+       built from here on is already correct.
+    2. **The application style is replaced** (``qt_apply_scheme``): Qt's
+       stylesheet, palette and proxy style are all global, so this repaints
+       every standard control at once.
+    3. **Every registered per-widget builder is re-run** (:func:`restyle`).
+       This is the step the earlier rebuild existed to avoid: a widget's
+       stylesheet is a string, so a colour interpolated into it at construction
+       time is frozen. Widgets now register *how* to build their stylesheet
+       (see :func:`themed`) and this walks the tree asking each one again.
+
+    ⚠️ **Icons need their own pass.** A :class:`QIcon` has the colour baked
+    into its pixmaps, so re-running stylesheets does not touch it; the toolbar
+    and menu icons are rebuilt here from the new palette.
+    """
+    from PySide6.QtWidgets import QApplication
+
+    set_palette(scheme)
+    app = QApplication.instance()
+    if app is not None:
+        qt_apply_scheme(app, scheme, font_point_size=app.font().pointSizeF())
+
+    # Merged rather than replaced: the file also holds the external redraw-model
+    # path, which this path does not own and must not erase.
+    save_settings_keeping(settings_for(scheme))
+
+    # Per-widget stylesheets first, then the icons: both read the palette
+    # rebound above, and doing them in this order means a widget that shows an
+    # icon and has its own stylesheet is fully correct after one pass.
+    restyle(window)
+    _restyle_icons(window)
+
+    # A floating panel may itself carry themed styles and icons; it is a child
+    # of the window, so `restyle(window)` already covered it, but its own
+    # colour-scheme bookkeeping has to be told which scheme is now in force.
+    #
+    panel = live_panel("_settings_panel")
+    if panel is not None:
+        try:
+            if panel.parentWidget() is window:
+                panel.set_scheme(scheme)
+        except RuntimeError:
+            # The panel died with an earlier window; nothing to update.
+            pass
+
+    window.update()
+    return window
+
+
+def _restyle_icons(window) -> int:
+    """Rebuild every themed icon in the window from the current palette.
+
+    Icons are rasterised pixmaps, so unlike a stylesheet they cannot simply be
+    asked to repaint -- the new colour has to be drawn into new pixmaps. Each
+    entry below is the same mapping the toolbar and menu were built with, so
+    this is a re-application of that mapping rather than a second definition.
+
+    Returns how many icons were replaced, which the tests assert on: an icon
+    pass that silently found nothing would leave a dark theme with pale icons
+    and no test failure.
+    """
+    mapping = {
+        "打开图片": ("open_image", "text"),
+        "图像预处理": ("preprocess", "text"),
+        "板框设置": ("board_setup", "text"),
+        "图层": ("layers", "text"),
+        "适应窗口": ("fit_window", "text"),
+        "另存为工程": ("save_project", "text"),
+        "另存为下单文件": ("export_gerber", "text"),
+    }
+    palette = {
+        "text": TEXT,
+        "muted": MUTED,
+        "accent": ACCENT,
+        "danger": DANGER,
+    }
+
+    changed = 0
+    toolbar = window.findChild(QToolBar)
+    if toolbar is not None:
+        for action in toolbar.actions():
+            entry = mapping.get(action.text())
+            if entry is None:
+                continue
+            name, tone_name = entry
+            action.setIcon(qt_theme_icon(name, palette[tone_name], size=18))
+            changed += 1
+    return changed
 
 
 def refresh_workspace_state(window) -> None:
@@ -7123,22 +10520,6 @@ def _move_project_tab(window, source: int, target: int) -> None:
     except IndexError:
         return
     refresh_project_tabs(window)
-
-
-class QStyleIcon:
-    """Names of the standard icons used above, resolved at build time."""
-
-    from PySide6.QtWidgets import QStyle as _S
-
-    SP_DialogOpenButton = _S.SP_DialogOpenButton
-    SP_DialogSaveButton = _S.SP_DialogSaveButton
-    SP_DialogApplyButton = _S.SP_DialogApplyButton
-    SP_DriveFDIcon = _S.SP_DriveFDIcon
-    SP_FileDialogContentsView = _S.SP_FileDialogContentsView
-    SP_FileDialogDetailedView = _S.SP_FileDialogDetailedView
-    SP_FileDialogInfoView = _S.SP_FileDialogInfoView
-    SP_FileDialogListView = _S.SP_FileDialogListView
-    BrowserReload = _S.SP_BrowserReload
 
 
 def main() -> int:
@@ -7257,8 +10638,20 @@ def main() -> int:
 
     app = QApplication(sys.argv)
     font = QFont("Microsoft YaHei UI", 9)
+
+    # ⚠️ **The theme has to be applied here, at startup.** It used to be
+    # applied only when the user *changed* a colour, so a freshly launched
+    # application ran on Windows' native controls -- a blue check box, a blue
+    # slider, square toolbar buttons. The saved scheme was read, but never
+    # handed to Qt, so the MD3 styling (which is where the check box and slider
+    # take their shapes and colours from) only appeared after visiting the
+    # settings panel once.
+    #
+    # ``apply_colour_scheme`` is deliberately not used here: it works by
+    # re-running every widget's style builder, and at this point no widgets
+    # exist yet. Startup wants the one-shot version, which is ``qt_apply_scheme``.
     app.setFont(font)
-    app.setStyleSheet(f"QWidget {{ color: {TEXT}; }} QMainWindow {{ background: {WINDOW_BG}; }}")
+    qt_apply_scheme(app, current_scheme(), font_point_size=font.pointSizeF())
 
     window = build_window()
     window.resize(args.width, args.height)

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from .artboard import ArtBoard
 from .draft import fingerprint
+from .undo import UndoStack
 
 __all__ = ["Project", "Workspace", "UNTITLED"]
 
@@ -68,6 +69,30 @@ class Project:
         #: been shown. Restoring it means switching tabs does not throw away
         #: the place the user had zoomed to.
         self.view: tuple[float, float, float] | None = None
+
+        #: This board's edit history. Per project rather than per window: undo
+        #: means "take back what I did *here*", so switching tabs must not let
+        #: Ctrl+Z rewrite a document that is not on screen. Built lazily so a
+        #: project that is only ever exported never pays for a snapshot.
+        self._history: UndoStack | None = None
+
+    @property
+    def history(self) -> UndoStack:
+        """The undo history for this board."""
+        if self._history is None:
+            self._history = UndoStack(self.board)
+        return self._history
+
+    def adopt_history(self, history: UndoStack) -> None:
+        """Take over a history that was already recording this board.
+
+        The canvas builds one when it is constructed, before any project
+        exists, so without this the opening board would have two stacks: the
+        canvas recording into its own, and the project holding an empty one
+        that takes over on the first tab switch. Everything edited in that
+        first stretch would quietly stop being undoable.
+        """
+        self._history = history
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"Project({self.title!r}, dirty={self.is_dirty()})"

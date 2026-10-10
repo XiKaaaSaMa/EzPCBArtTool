@@ -9,7 +9,7 @@
 
 整个流程在软件里点着走，参数改一下画布上立刻能看到结果。
 
-> 当前版本 **0.1.2**。
+> 当前版本 **1.0.0**。
 > 安装包在 `安装包保存区\`，源码运行见下面「安装与运行」。
 
 ---
@@ -46,6 +46,63 @@
 Gerber 已用第三方解析器独立复验过尺寸与单位（毫米）；文件是纯 ASCII，
 不会被上传解析器认错。
 
+### 线稿重绘（可选，需要自备模型）
+
+现有线稿读法问的是「这个像素是不是边」，所以只能描摹已有的线条：
+明暗过渡会被压成两块、细眉毛和衣褶糊掉。**线稿重绘**换一种做法——
+让模型照着原图**重新画一遍**，主动补出干净的笔画。
+
+| 项目 | 说明 |
+|---|---|
+| **入口** | 【图像预处理 → 9 · 线稿重绘（外接模型）】。那一栏显示当前状态，点【外接模型设置与说明…】看需要什么、指定文件夹。**只在「线稿」风格下出现**（板画和彩色丝印用不到） |
+| **模型** | Anime2Sketch（MIT）。**不由本工具提供**，需自己下载，见下节 |
+| **两个滑块** | **线条密度**（1–25%，默认 5%）决定哪些线入选；**线条加粗**（0–0.40 mm，默认 0.08）决定线能不能印出来。两者互不替代 |
+| **适用** | 立绘（素材库里是 880–3044 px）。**精2 那种带背景的立绘暂不考虑**——模型会把背景当成主体画进去 |
+| **不适用** | 真人照片不在模型训练域内，效果明显差于插画 |
+| **现状** | 界面里的入口只负责**检测和指向**；重绘工作区仍是独立工具 `tools\line_redraw_panel.py`（两图对比 + 两个滑块），导出 PNG 后再回本窗口上传。**尚未并入主窗口** |
+
+### 外接模型
+
+模型**不打包进安装包**，由用户自己下载并指定路径。两个原因，都是实测：
+
+- **太大**：权重 183 MB（improved）+ 架构文件，而整个安装包才 178 MB；
+- **太重**：纯 CPU 跑一次要 **1.6 秒、峰值 4.6 GB 内存**（1024 px 输入，
+  24 线程；单线程 8.6 秒）。不是每台机器都该被强加这个开销。
+
+**不设置也能正常用软件**，只是线稿重绘会提示未安装，其余功能完全不受影响。
+
+**怎么装**
+
+```bat
+python tools\fetch_anime2sketch.py
+```
+
+脚本会把架构文件和两套权重下到默认位置（源码运行是 `out\_models\a2s`，
+安装版是 `%LOCALAPPDATA%\PCB艺术板工具\models\a2s`）。想放别处就加
+`--outdir`，或者从别处拷一份进去：
+
+```
+<模型文件夹>\
+  model.py              架构（必须）
+  weights\
+    improved.bin        项目实际使用的权重（必须）
+    netG.pth            作者原始版（可选）
+```
+
+**怎么指定路径**，四选一，从先到后：
+
+1. 命令行 `--model-dir "D:\models\a2s"`；
+2. 环境变量 `PCBART_A2S_MODEL=D:\models\a2s`；
+3. **【视图 → 界面设置… → 线稿重绘模型】** 里点【选择文件夹…】；
+4. 默认位置（上面那两个），把文件放进去即可。
+
+设置面板里会显示当前生效的路径、缺哪个文件，以及环境变量是否正在覆盖你的选择。
+
+**格式要求**：架构必须是参考仓库的 `model.py`，权重必须是配套的那套。
+`improved.bin` 和 `netG.pth` **不通用**——improved 版换了 6 层网络结构
+（反卷积 → resize+conv），只有配套的架构能加载。项目默认用 improved，
+因为默认版权重会把深色立绘的中段画成散碎片段。
+
 ### 界面
 
 | 功能 | 说明 |
@@ -56,6 +113,11 @@ Gerber 已用第三方解析器独立复验过尺寸与单位（毫米）；文�
 | **图层** | 七个真实图层（正反面铜 / 丝印 / 阻焊 + 板框），颜色与 EDA 里一致。当前层接收新导入的图，隐藏的层不会被误选中 |
 | **缩放平移** | 滚轮以指针为锚点缩放、中键或空格拖动平移、【编辑 → 适应窗口】复位 |
 | **浮窗** | 预处理 / 板框设置 / 图像预览都是软件内浮窗，可拖边框缩放（四边 + 四角共 8 个可见把手）、可折叠 |
+| **界面配色** | 【视图 → 界面设置…】换主色（18 个预设）、浅色/深色；【高级】里 18 个颜色角色逐个可调。【4 · 线稿重绘模型】指定外接模型的文件夹。选完立刻生效并自动记住 |
+| **画布坐标轴** | 黑底画布，过原点画 X/Y 轴，带刻度、毫米读数、方向箭头；网格随缩放自动变疏 |
+
+界面按 **Material Design 3** 的规范配色，图标用 **Iconoir**（只有「图层」
+一个借用 Lucide —— Iconoir 没有这个概念）。第三方许可见 `docs/THIRD_PARTY.md`。
 
 ### 性能与健壮性
 
@@ -77,6 +139,7 @@ Gerber 已用第三方解析器独立复验过尺寸与单位（毫米）；文�
 | **走线风格** | 铜层目前只有**填充**风格（一块块铺铜）。「走线」风格（骨架化 → 中心线 + 线宽）接口留着，**尚未实现**，现在还调不到 |
 | **工艺校验** | 校验代码写好了（最小尺寸、细颈、轮廓有效性），但**导出时还没自动跑**。目前靠导出的文件在 EDA 里能打开来发现问题 |
 | **简化容差** | 模型里有这个参数，**界面没有滑块**，暂时只能用默认值 |
+| **重绘工作区** | 【图像预处理 → 9 · 线稿重绘】只做**检测与引导**（说明要什么、指到哪里下、跳到模型设置）。真正的两滑块工作区仍是 `tools\line_redraw_panel.py`，**尚未并入主窗口** |
 
 ### 已知限制
 
@@ -132,7 +195,7 @@ run.bat
 ### 命令行
 
 ```bat
-run.bat test                                    :: 跑测试（878 项）
+run.bat test                                    :: 跑测试（1700 项）
 run.bat outline "图片.png" --width 60           :: 图片 → 异形板框
 python tools\make_board_art.py "图片.png" --outdir out --name board --render
 run.bat calibrate "路径\到\工程.epro2"          :: 分析工程，自动定标单位与图层
@@ -145,7 +208,7 @@ run.bat calibrate "路径\到\工程.epro2"          :: 分析工程，自动定
 | 项 | 版本 |
 |---|---|
 | Python | 3.11 / 3.12（`run.bat` 会自己找） |
-| 依赖 | PySide6、numpy、opencv-python-headless、shapely、pytest |
+| 依赖 | PySide6、numpy、opencv-python-headless、shapely、Pillow、pytest |
 | Node.js | 24（只有独立校验器用得到，跑软件不需要） |
 
 ---
@@ -161,38 +224,75 @@ run.bat calibrate "路径\到\工程.epro2"          :: 分析工程，自动定
 pcbart/                 核心库（纯 Python，不依赖 Qt）
   units.py              单位换算（唯一常量 EPRU_UNIT_MM = 0.0254）
   epru.py               .epru 日志解析 / 序列化 / .epro2 容器读写
+  eprj3.py              EDA 工程文件（.eprj3）读写
   primitives.py         图元载荷、路径语法编解码
   geometry.py           复杂多边形绕向规范化（外框 CW、内洞 CCW）
+  shapes.py             基础图形（矩形 / 圆角 / 圆）几何
   layers.py             60 条图层定义（实测自 EasyEDA Pro 3.2.149）
+  design_layers.py      本工具实际使用的七层、颜色与绘制顺序
   templates.py          工程骨架记录
   image_prep.py         图像去噪、二值化、极性自动判定、主体掩膜
-  lineart.py            线稿转换（PS 颜色减淡配方的闭式解）
+  image_size.py         像素尺寸读取（不依赖 Qt；读不出就报错）
+  lineart.py            线稿转换（填充色块 / 描边+填充 / 纯线条三种读法）
   denoise.py            降噪（移植自 PCB_lightgraph，MIT）
   boardart.py           板画风格：双色块面 + 内缩白轮廓
   outline.py            轮廓提取、简化、轴向吸附、圆识别、工艺补偿
   compose.py            异形板组合（描边与预设形状并集）
   standee.py            立牌插舌几何
   vectorize.py          掩膜 → 复杂多边形（FILL 已实现，TRACE 预留）
+  curve_fit.py          折线 → 圆弧拟合
+  vtrace.py             spline → 弧（阵营 logo 用）
   validation.py         轮廓有效性 + 工艺规则校验
   generator.py          板框生成器 + FILL 写入
   export.py             导出 .epro2
-  gerber.py             导出 Gerber + 打包 zip
+  gerber.py             导出 Gerber + Excellon 钻孔 + 打包 zip
+  merge.py              多张卡合并成一个 .epro2（整体平移）
+  color_image.py        .epro2 里的彩色图片对象（OBJ + BLOB 内嵌 PNG）
+  text_render.py        文字 → 掩膜（排版与锚点标定）
   draft.py              草稿存取、指纹脏标记、草稿库
   projects.py           多工程工作区模型（纯 Python，可脱离窗口测）
-  artboard.py           设计文档模型（板框规格 + 图片放置）
+  artboard.py           设计文档模型（板框 + 图片放置 + 文字 + 挖槽）
+  undo.py               撤销（整份文档快照；每块板独立栈）
   paths.py              写盘路径（源码运行 / 打包后分别解析）
   work_scale.py         大图受限分辨率计算
+
+  —— 通行证（立牌卡）——
+  badge_template.py     从模板工程文件里读出板框与挖槽
+  badge_card.py         两张正式模板的区域表（立绘短区 / 长区等）
+  badge_content.py      四要素：干员二维码 / 条形码 / 职业图标 / 阵营 logo
+  badge_art.py          模板固定装饰（边框、纹理、罗德岛标志）
+  badge_decorations.py  装饰几何（区域 + 描边两种）
+  badge_raster.py       二维码与条形码的位图光栅化
+  qr_code.py            二维码编码器（字节模式、纠错 L/M、v1–4）
+  code128.py            Code128B 条形码编码器
+  badge_codes.py        PRTS 链接、短链入口、尺寸与扫描警告
+  short_url.py          短网址接口
+  badge_short_urls.py   463 位干员的短链映射表
+  operators.py          干员资料库（职业 / 编号 / 阵营）
+  operator_names.py     干员中文名
+  operator_names_en.py  干员英文名
+  figure_crop.py        立绘裁切辅助
+  face_model.py         人脸检测接口（YuNet）
+
+  —— 界面与外部依赖 ——
+  ui_theme.py           MD3 配色（从一个主色算出来）
+  ui_icons.py           矢量图标（Iconoir / Lucide）
+  model_paths.py        外接重绘模型路径的四级解析
+  models/face.onnx      YuNet 人脸模型（随包分发，必须入库）
+
 tools/                  命令行工具与界面
   gui_mockup.py         桌面应用主体
-  design_canvas.py      画布交互（选中 / 拖动 / 缩放 / 平移）
+  design_canvas.py      画布交互（选中 / 拖动 / 缩放 / 平移 / 取景）
+  qt_theme.py           Qt 侧主题（样式表、图标光栅化）
   make_board_art.py     命令行出图
   make_outline_from_image.py   图片 → 异形板框
+  make_color_set.py     一条命令导出整套（单卡 + 合并 + 总览）
   render_board.py       按原始坐标渲染，校验朝向与几何
   verify_epro2.mjs      独立校验器（Node，不共享 Python 代码）
   acceptance_check.py   端到端验收（两块板跑完整流程 + 重开）
   simulate_ui.py        渲染多种界面状态到 PNG
 docs/                   调研结论与验证清单
-tests/                  878 项测试
+tests/                  1700 项测试
 out/                    生成的样本与缓存（已 gitignore）
 ```
 
@@ -237,7 +337,7 @@ EasyEDA 自己标注为 `99.873mm`，而 `3932.0079 × 0.0254 = 99.8730`。
 ## 验证
 
 ```bat
-run.bat test                                    :: 878 项测试
+run.bat test                                    :: 1700 项测试
 node tools\verify_epro2.mjs out\sample.epro2    :: 独立校验（Node）
 python tools\acceptance_check.py                :: 端到端验收
 ```
@@ -259,3 +359,10 @@ python tools\acceptance_check.py                :: 端到端验收
 | [docs/M2_FIXES.md](docs/M2_FIXES.md) | 三个几何缺陷的定位与修复 |
 | [docs/M2_CUTOUTS.md](docs/M2_CUTOUTS.md) | 开孔方案（历史记录，功能已移除） |
 | [docs/M3_ENCODING.md](docs/M3_ENCODING.md) | 铜层编码实测 + 对照实验 |
+
+## 许可证
+
+Copyright (C) 2026 PCB Art Board Tool contributors
+
+本项目以 **GNU General Public License v3.0**（GPL-3.0-only）发布，
+完整条款见 [LICENSE](LICENSE)。

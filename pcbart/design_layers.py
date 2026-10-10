@@ -29,7 +29,9 @@ __all__ = [
     "DesignLayer",
     "LAYERS",
     "LAYER_KEYS",
+    "LAYER_PAINT_ORDER",
     "layer",
+    "paint_rank",
     "LayerStack",
 ]
 
@@ -99,6 +101,42 @@ LAYERS: tuple[DesignLayer, ...] = (
 )
 
 LAYER_KEYS: tuple[str, ...] = tuple(item.key for item in LAYERS)
+
+#: Bottom-to-top paint order, as one flat list covering both sides.
+#:
+#: Within a side the stack is **copper on top, silkscreen in the middle, solder
+#: mask underneath** -- that is the order 嘉立创 produces a board in unless the
+#: order says otherwise, so showing anything else means the canvas promises a
+#: stack the factory will not build. The bottom side sits below the top side,
+#: because the canvas looks at the board from the top; a bottom layer shows
+#: through only where nothing on the top side covers it.
+#:
+#: ⚠️ **One definition, read by every drawing path.** The layer panel used to
+#: list copper first while the canvas painted mask last -- so the right-hand
+#: copper strip of the card came out purple, the mask tint sitting over it,
+#: even though the panel said copper was the upper layer.
+LAYER_PAINT_ORDER: tuple[str, ...] = (
+    "bottom_mask",
+    "bottom_silk",
+    "bottom_copper",
+    "top_mask",
+    "top_silk",
+    "top_copper",
+)
+
+_PAINT_RANK: dict[str, int] = {
+    key: index for index, key in enumerate(LAYER_PAINT_ORDER)
+}
+
+
+def paint_rank(key: str) -> int:
+    """Where a layer sits in the stack: higher is painted later, i.e. on top.
+
+    The board outline is not part of the artwork stack -- it is a boundary the
+    canvas draws on top of everything -- so it is ranked above all of them.
+    An unknown key lands there too rather than disappearing under every layer.
+    """
+    return _PAINT_RANK.get(key, len(LAYER_PAINT_ORDER))
 
 
 def layer(key: str) -> DesignLayer:

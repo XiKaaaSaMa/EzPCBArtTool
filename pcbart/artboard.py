@@ -38,7 +38,7 @@ from .compose import (
     trace_artwork_ring,
 )
 from .design_layers import LayerStack
-from .geometry import ensure_cw, rounded_rect_ring
+from .geometry import circle_ring, densify_ring, ensure_cw, rounded_rect_ring
 from .standee import (
     DEFAULT_TAB_HEIGHT_MM,
     DEFAULT_TAB_WIDTH_MM,
@@ -58,6 +58,14 @@ __all__ = [
     "OutlineShape",
     "BoardOutlineSpec",
     "ImagePlacement",
+    "PlacementGroup",
+    "TextElement",
+    "CutoutElement",
+    "NAME_TOKEN",
+    "NUMBER_TOKEN",
+    "ENGLISH_TOKEN",
+    "TOKENS",
+    "substitute_tokens",
     "drawn_size_mm",
     "placement_for_pixels",
     "ArtBoard",
@@ -104,6 +112,13 @@ class OutlineShape:
     ROUNDED = "rounded"
     CIRCLE = "circle"
     IRREGULAR = "irregular"
+    TEMPLATE = "template"
+    """A board whose outline comes from a template, not from a preset.
+
+    The 通行证 card is this: a rectangle with cut corners and a notch on one
+    edge, which no preset can express. The ring lives in ``template_outline``
+    and the preset size fields are ignored for it.
+    """
     """Combines the artwork's outline with a shape chosen in its own panel.
 
     Present in :data:`SHAPE_CHOICES` but not in :data:`OUTLINE_SHAPES`: it is a
@@ -115,6 +130,7 @@ class OutlineShape:
         ROUNDED: "圆角矩形",
         CIRCLE: "圆形",
         IRREGULAR: "异形板",
+        TEMPLATE: "模板",
     }
 
     #: Shapes a circle's worth of vertices can be described by, as opposed to
@@ -203,7 +219,23 @@ class BoardOutlineSpec:
     """
 
     template: str | None = None
-    """Name of the template this spec came from, if any. Reserved."""
+    """Name of the template this spec came from, if any."""
+
+    template_outline: tuple[tuple[float, float], ...] = ()
+    """The template's outline ring, centred on the origin, in millimetres.
+
+    A tuple of points rather than a list so the spec stays hashable and the
+    outline caches can key on it. Empty unless ``shape`` is
+    :attr:`OutlineShape.TEMPLATE`.
+    """
+
+    template_arcs: tuple[float | None, ...] = ()
+    """One signed arc sweep per :attr:`template_outline` segment.
+
+    Empty for a straight-edged template.  The card's four rounded corners use
+    this: the exported path keeps native ``ARC`` tokens, while the canvas and
+    geometry checks work from :meth:`polygon` after the curves are sampled.
+    """
 
     irregular_base: str = IrregularBase.TRACE
     """How the artwork's outline combines with a shape, for an irregular board.
@@ -352,6 +384,14 @@ class BoardOutlineSpec:
         Only the parametric shapes are produced here. ``irregular`` needs the
         artwork, so it is built by :meth:`ArtBoard.outline_polygon` instead.
         """
+        if self.shape == OutlineShape.TEMPLATE:
+            # Already centred and in millimetres; nothing to derive.  When the
+            # template names arc sweeps, sample them so the canvas, validation
+            # and Gerber all see the curved corner rather than its chord.
+            points = [(float(x), float(y)) for x, y in self.template_outline]
+            if self.template_arcs:
+                return densify_ring(points, self.template_arcs)
+            return points
         if self.shape == OutlineShape.CIRCLE:
             # A valid circle stores equal sides (see validate); the minimum is
             # used so an inconsistent spec still draws a circle rather than an
@@ -383,12 +423,80 @@ class BoardOutlineSpec:
             (-half_w, -half_h),
         ]
 
+    def polygon_raw(self) -> list[tuple[float, float]]:
+        """The template's corner vertices, without sampling its arcs."""
+        if self.shape == OutlineShape.TEMPLATE:
+            return [(float(x), float(y)) for x, y in self.template_outline]
+        return self.polygon()
+
+    def outline_path(self) -> list[Any]:
+        """The outline as an EasyEDA path token stream, in millimetres.
+
+        Straight templates use the same polyline path as before.  A template
+        with arc metadata keeps native ``ARC`` segments so the editor gets a
+        round corner that stays editable as an arc rather than a sampled
+        polygon.  The stream starts on a straight segment because the grammar
+        expects the opening ``L`` run before an arc token.
+        """
+        from .primitives import Mode
+
+        vertices = self.polygon_raw()
+        if len(vertices) < 3:
+            return []
+
+        arcs = self.template_arcs if self.shape == OutlineShape.TEMPLATE else ()
+        if not arcs:
+            # ⚠️ **The loop closes explicitly, and forgetting that is what made
+            # a rectangular board export with one edge missing.** A path is a
+            # start point plus one segment per following point, so a four-corner
+            # ring written as four points draws only three edges -- measured on
+            # a 60 x 60 board, the file carried 顶点 左上→右上→右下→左下 and the
+            # whole left side was gone. On a circle the same omission removes one
+            # 3.75-degree segment out of 96 and nobody would ever see it, which is
+            # why it went unnoticed until the user made a square board.
+            #
+            # The arc branch below has always closed (`range(1, len + 1)` with a
+            # modulo), and ``test_the_template_outline_samples_its_corner_arcs``
+            # already asserts the invariant that the first and last decoded
+            # points coincide. This branch simply never did it, so the same
+            # outline was closed or not depending on whether it had curves.
+            path: list[Any] = [vertices[0][0], vertices[0][1], Mode.L]
+            path.extend([value for point in vertices[1:] for value in point])
+            path.extend(vertices[0])
+            return path
+
+        start = next(
+            (
+                index
+                for index in range(len(vertices))
+                if (arcs[index] if index < len(arcs) else None) is None
+            ),
+            0,
+        )
+        path = [vertices[start][0], vertices[start][1], Mode.L]
+        for step in range(1, len(vertices) + 1):
+            segment = (start + step - 1) % len(vertices)
+            end = vertices[(segment + 1) % len(vertices)]
+            sweep = arcs[segment] if segment < len(arcs) else None
+            if sweep is None:
+                path.extend(end)
+            else:
+                path.extend([Mode.ARC, float(sweep), end[0], end[1]])
+        return path
+
     def validate(self) -> list[str]:
         """Human-readable problems with this spec; empty when it is usable."""
         problems: list[str] = []
-        known = OUTLINE_SHAPES + (OutlineShape.IRREGULAR,)
+        # ``TEMPLATE`` belongs here for the same reason ``IRREGULAR`` does: it
+        # is a shape the model supports that is not one of the presets a size
+        # can be typed into. Omitting it made every 通行证 card fail validation
+        # with "未知的板框外形: template", so a card could be designed and
+        # never exported -- the two exporters both validate before writing.
+        known = OUTLINE_SHAPES + (OutlineShape.IRREGULAR, OutlineShape.TEMPLATE)
         if self.shape not in known:
             problems.append(f"未知的板框外形: {self.shape}")
+        if self.shape == OutlineShape.TEMPLATE and len(self.template_outline) < 3:
+            problems.append("模板板框缺少轮廓点，请重新套用模板")
         if self.width_mm <= 0 or self.height_mm <= 0:
             problems.append("板框尺寸必须为正数")
         if min(self.width_mm, self.height_mm) < 3.0:
@@ -431,6 +539,46 @@ def _rounded_rect(
     complex-polygon writer wants.
     """
     return ensure_cw(rounded_rect_ring(width, height, radius, segments))
+
+
+def _obround_ring(
+    width: float, height: float, segments: int = 32
+) -> list[tuple[float, float]]:
+    """A stadium-shaped ring centred on the origin, counter-clockwise, Y up.
+
+    The long lanyard opening is a routed slot: its two ends are half-circles,
+    not square corners.  Building it from the short side's radius is what keeps
+    the straight runs and both caps sharing one tangent.
+    """
+    width = max(float(width), 0.01)
+    height = max(float(height), 0.01)
+    radius = min(width, height) / 2.0
+    half_w = width / 2.0
+    half_h = height / 2.0
+    points: list[tuple[float, float]] = []
+    if width >= height:
+        left_x = -half_w + radius
+        right_x = half_w - radius
+        points.append((left_x, -radius))
+        points.append((right_x, -radius))
+        for index in range(segments + 1):
+            angle = -math.pi / 2.0 + math.pi * index / segments
+            points.append((right_x + radius * math.cos(angle), radius * math.sin(angle)))
+        for index in range(segments + 1):
+            angle = math.pi / 2.0 + math.pi * index / segments
+            points.append((left_x + radius * math.cos(angle), radius * math.sin(angle)))
+    else:
+        bottom_y = -half_h + radius
+        top_y = half_h - radius
+        points.append((-radius, bottom_y))
+        points.append((-radius, top_y))
+        for index in range(segments + 1):
+            angle = math.pi + math.pi * index / segments
+            points.append((radius * math.cos(angle), top_y + radius * math.sin(angle)))
+        for index in range(segments + 1):
+            angle = math.pi * index / segments
+            points.append((radius * math.cos(angle), bottom_y + radius * math.sin(angle)))
+    return points
 
 
 # -------------------------------------------------------------- image placement
@@ -486,6 +634,35 @@ class ImagePlacement:
     from the other and tile the board exactly.
     """
 
+    source_window: tuple[float, float, float, float] | None = None
+    """Which part of the picture to draw, as ``(x0, y0, x1, y1)``.
+
+    Fractions of the source picture, 0-1, with Y measured **from the top** like
+    the image itself rather than like the board. ``None`` means the whole
+    picture, which is what every placement meant before this existed.
+
+    This is how the 通行证 template lets the user frame the artwork: the region
+    on the card is a window onto the picture, and the part outside it is what
+    gets cut off. Storing the window on the placement means the canvas, the
+    ``.epro2`` writer and the Gerber writer all read one definition -- the same
+    reason 旋转/翻转 live here.
+    """
+
+    region: str = ""
+    """Key of the 通行证 region this artwork was framed into, or empty.
+
+    ⚠️ **This is an export-time clip, not a label.** The region on the card is
+    where the artwork is printed, and the user asked for the picture outside it
+    to be cut -- but the region was only a canvas guide: resize or move the
+    framed picture afterwards (both are allowed, and both are normal editing)
+    and the export wrote ink outside the card's own opening.
+
+    Recording *which* region makes the boundary enforceable at write time, so
+    what gets manufactured is always what the card's layout allows. Empty for
+    everything that was never framed -- a plain board, or an import on a board
+    that is not the card -- and those keep the old behaviour exactly.
+    """
+
     import_id: str = ""
     """Which import this object came from.
 
@@ -500,6 +677,33 @@ class ImagePlacement:
     hand-built documents (tests, scripts, the board panel) out of the grouping.
     """
 
+    kind: str = ""
+    """What sort of generated artwork this is, for the ones the card inserts.
+
+    ``"qr"`` / ``"barcode"`` / ``"profession"`` / ``"faction"``, or empty for a
+    picture the user imported. It exists because the four share one
+    ``import_id`` -- one button inserts them -- but they do **not** share a
+    representation: the two codes are black-on-transparent and the canvas has
+    to recolour them by alpha, while the faction logo is a white line drawing
+    that must be drawn as-is. Without this the canvas could only tell the four
+    apart by their layer or size.
+    """
+
+    element_id: str = ""
+    """Stable identity for this object, so a group can name its members.
+
+    ⚠️ **Position in the list cannot serve as an identity.** Undo restores the
+    document by overwriting placements *in place* and reusing the objects, and
+    deleting or reordering shifts every index after it -- so a group storing
+    indices would silently re-point at different artwork after the first undo.
+    An id that travels with the object survives all of it.
+
+    Minted by :meth:`ArtBoard.element_id` rather than in ``__post_init__``: a
+    dataclass that generated one on construction would give the same placement
+    a fresh identity every time it was copied or rebuilt, which is exactly what
+    this field exists to prevent.
+    """
+
     @property
     def layer_key(self) -> str:
         from .design_layers import LayerStack
@@ -510,6 +714,37 @@ class ImagePlacement:
     def source_aspect(self) -> float:
         """Width divided by height. Guards against a zero height."""
         return self.width_mm / self.height_mm if self.height_mm else 1.0
+
+    def source_rect(self, width_px: int, height_px: int) -> tuple[int, int, int, int]:
+        """The part of a ``width_px`` x ``height_px`` picture to use, in pixels.
+
+        One implementation for the canvas and both writers: a window that the
+        three of them rounded differently would show the user one framing and
+        export another.
+        """
+        if width_px <= 0 or height_px <= 0:
+            return (0, 0, 0, 0)
+        window = self.source_window
+        if window is None:
+            return (0, 0, width_px, height_px)
+
+        x0, y0, x1, y1 = window
+        left = max(0, min(width_px, int(round(min(x0, x1) * width_px))))
+        right = max(0, min(width_px, int(round(max(x0, x1) * width_px))))
+        top = max(0, min(height_px, int(round(min(y0, y1) * height_px))))
+        bottom = max(0, min(height_px, int(round(max(y0, y1) * height_px))))
+        # A collapsed window would divide by zero downstream; fall back to the
+        # whole picture rather than producing a zero-width mask.
+        if right - left < 1 or bottom - top < 1:
+            return (0, 0, width_px, height_px)
+        return (left, top, right, bottom)
+
+    def source_aspect_for(self, width_px: int, height_px: int) -> float:
+        """Aspect of the part of the picture being used, not of the whole."""
+        left, top, right, bottom = self.source_rect(width_px, height_px)
+        width = right - left
+        height = bottom - top
+        return width / height if height else 1.0
 
     def contains_point(self, x_mm: float, y_mm: float) -> bool:
         """Whether a board-space point falls inside the rotated rectangle.
@@ -562,6 +797,50 @@ class ImagePlacement:
                 )
             )
         return result
+
+    def overlaps_rect(self, bounds: tuple[float, float, float, float]) -> bool:
+        """Whether this placement's box still touches an axis-aligned rectangle.
+
+        Used for one question the canvas asks on every frame: *has this picture
+        been moved completely out of its illustration opening?* The picture is
+        allowed to go anywhere -- the user asked for free movement so that a
+        figure can be arranged around the card's top cutout -- but a picture that
+        has left the opening entirely prints nothing, and silently showing an
+        empty opening is how the user loses their artwork without noticing.
+
+        ⚠️ **An exact test, not a bounding-box overlap.** A rotated picture's
+        bounding box stays large, so comparing boxes would report "still
+        overlapping" for a 45-degree picture whose corners no longer reach the
+        opening -- and that is precisely the case where the warning matters.
+        The separating-axis test below is exact for two convex shapes and costs
+        four projections.
+        """
+        x0, y0, x1, y1 = bounds
+        low_x, high_x = min(x0, x1), max(x0, x1)
+        low_y, high_y = min(y0, y1), max(y0, y1)
+        opening = [
+            (low_x, low_y),
+            (high_x, low_y),
+            (high_x, high_y),
+            (low_x, high_y),
+        ]
+        points = self.corners()
+
+        # The opening's two axes, then the picture's own two. Two convex shapes
+        # are disjoint exactly when some axis separates their projections.
+        edge = (points[1][0] - points[0][0], points[1][1] - points[0][1])
+        side = (points[3][0] - points[0][0], points[3][1] - points[0][1])
+        axes = ((1.0, 0.0), (0.0, 1.0), edge, side)
+        for ax, ay in axes:
+            length = math.hypot(ax, ay)
+            if length < 1e-9:
+                continue
+            ax, ay = ax / length, ay / length
+            mine = [x * ax + y * ay for x, y in points]
+            theirs = [x * ax + y * ay for x, y in opening]
+            if max(mine) < min(theirs) or max(theirs) < min(mine):
+                return False
+        return True
 
     def resize_to(
         self,
@@ -658,6 +937,334 @@ class ImagePlacement:
             (a * x + c * y + e, b * x + d * y + f) for x, y in ring
         ]
 
+    def board_arc_ring(self, ring):
+        """A ring of lines and arcs, over the same matrix as ``board_ring``.
+
+        ⚠️ **A mirror reverses every arc's sweep.** ``sweeps[i]`` is signed
+        relative to the direction of travel, so reflecting the ring turns a
+        counter-clockwise bulge into a clockwise one. Leaving the signs alone
+        on a flipped placement mirrored the vertices but not the curves, which
+        reads as every arc bending the wrong way -- the same class of defect as
+        the flip that used to move the selection box instead of the picture
+        (see :mod:`pcbart.placements` history in the docs).
+
+        The determinant's sign is exactly that question: the matrix is
+        mirror-then-rotate, no scaling, so it is a reflection precisely when
+        one of the two flips is on -- in which case ``a*d - b*c`` is negative.
+        A pure rotation keeps the sweeps, and so does a flip in both axes
+        (that is a half turn, not a reflection).
+        """
+        from .geometry import ArcRing
+
+        a, b, c, d, e, f = self.matrix()
+        mirrored = (a * d - b * c) < 0
+        return ArcRing(
+            points=[
+                (a * x + c * y + e, b * x + d * y + f) for x, y in ring.points
+            ],
+            sweeps=[-s if mirrored else s for s in ring.sweeps],
+        )
+
+
+# ----------------------------------------------------- template text and cutouts
+
+NAME_TOKEN = "{代号}"
+NUMBER_TOKEN = "{编号}"
+ENGLISH_TOKEN = "{英文名}"
+
+#: The substitutions the operator picker performs on template text.
+#:
+#: A token rather than a "this text is the name" flag, because the card's own
+#: wording is part of the design: the vertical strip reads ``ARKNIGHTS-`` and
+#: then the operator's number, and a flag field would have had to store that
+#: prefix somewhere else, where editing it would be a second, differently-behaved
+#: thing. With a token the user rewrites the whole line in one box, and
+#: :func:`substitute_tokens` leaves a line with no token alone rather than
+#: guessing which part of it was meant to be the number.
+#:
+#: ``{英文名}`` exists beside ``{代号}`` because the 干员代号 line is set in the
+#: template's own ``Agency FB Negreta`` -- a Latin-only face -- so the Chinese
+#: name draws as empty boxes there. Having two tokens rather than making
+#: ``{代号}`` mean English keeps both available: the user can put the Chinese
+#: name on some other line, or switch this one back, without any code change.
+TOKENS = (NAME_TOKEN, ENGLISH_TOKEN, NUMBER_TOKEN)
+
+
+def substitute_tokens(text: str, *, name: str = "", number: str = "") -> str:
+    """Replace :data:`TOKENS` in ``text`` with the current operator's values.
+
+    An empty value leaves the token visible. Showing ``{代号}`` on the card is
+    the honest outcome: it says no operator has been chosen yet, where blanking
+    it would look exactly like a card whose name was deleted.
+
+    ``{英文名}`` is derived from ``name`` through
+    :func:`pcbart.operator_names.english_name`, so a caller only has to pass
+    the name it already has.
+
+    ⚠️ **One pass, not four replacements.** Doing ``replace(NAME).replace(...)``
+    re-scans the *substituted* text, so a name that happens to contain
+    ``{编号}`` -- or any of the 463 operator names containing a brace -- would
+    be rewritten into the number. Scanning once for every token and emitting
+    each match straight to the output is the only version that cannot reparse
+    its own work.
+    """
+    if not text:
+        return ""
+    from .operator_names import english_name
+
+    values = {
+        NAME_TOKEN: name,
+        ENGLISH_TOKEN: english_name(name) if name else "",
+        NUMBER_TOKEN: number,
+    }
+    result: list[str] = []
+    index = 0
+    while index < len(text):
+        for token, value in values.items():
+            if text.startswith(token, index):
+                # An empty value leaves the token in place rather than running
+                # it through as "" -- see the docstring.
+                result.append(value if value else token)
+                index += len(token)
+                break
+        else:
+            result.append(text[index])
+            index += 1
+    return "".join(result)
+
+
+@dataclass
+class TextElement:
+    """A line of text that is part of the board, not part of a picture.
+
+    Template cards are mostly text -- the operator's name, the number strip,
+    the fixed wording -- and the user has to be able to change all of it. This
+    is stored as geometry rather than as a rendered image because the whole
+    point is that it stays editable, and because a ten-millimetre glyph
+    exported as a picture would be a bitmap of the letter that the board house
+    has to trace.
+
+    ``x_mm``/``y_mm`` are the anchor, not the centre: template text is anchored
+    where it was drawn (``LEFT_BOTTOM`` throughout, measured from the source
+    files), and an anchor survives a change of wording while a centre would
+    make the line jump sideways every time a character was typed.
+    """
+
+    text: str = ""
+    x_mm: float = 0.0
+    y_mm: float = 0.0
+    size_mm: float = 1.0
+    """Cap height in millimetres, matching the font size the source file uses."""
+
+    element_id: str = ""
+    """Stable identity, for the same reason :attr:`ImagePlacement.element_id`
+    exists: a group names its members by id, and a text line is an element the
+    user can put in one. See that field."""
+
+    rotation_deg: float = 0.0
+    layer: str = "顶层丝印层"
+    font: str = ""
+    """Family name as the source file spells it.
+
+    Kept for the editor's own use and for writing the file back; the canvas
+    falls back to its own font, because the exact face is not installed
+    everywhere and a substituted font still shows the line in the right place.
+    """
+    anchor: str = "left_bottom"
+    label: str = ""
+    """What this line is for, shown in the content panel's list.
+
+    Never used as the text itself: a label the user can see is one they will
+    try to edit, so the placeholder wording and the label are separate.
+    """
+
+    @property
+    def layer_key(self) -> str:
+        from .design_layers import LayerStack
+
+        return LayerStack().layer_for_name(self.layer)
+
+    def resolved_text(self, *, name: str = "", number: str = "") -> str:
+        return substitute_tokens(self.text, name=name, number=number)
+
+    def contains_point(self, x_mm: float, y_mm: float) -> bool:
+        """Whether a board point is close enough to count as clicking this line.
+
+        Text has no stored outline -- its extent depends on the font -- so the
+        hit box is derived from the line's own length. A rough box is right
+        here: the alternative is measuring glyphs, and a click that lands on
+        the line but one millimetre outside its box would read as the canvas
+        ignoring it.
+        """
+        width, height, bbox_y = self.box_mm()
+        return (
+            self.x_mm <= x_mm <= self.x_mm + width
+            and bbox_y <= y_mm <= bbox_y + height
+        )
+
+    def box_mm(self) -> tuple[float, float, float]:
+        """``(width, height, bottom_y)`` of the line's hit box.
+
+        Measured from the anchor. A quarter-width letter is a reasonable
+        average for the mixed CJK/Latin wording these cards carry, and it is
+        only ever used for picking.
+        """
+        height = max(self.size_mm, 0.1)
+        width = max(len(self.text), 1) * height * 0.62
+        return (width, height, self.y_mm)
+
+    def corners(self) -> list[tuple[float, float]]:
+        """The hit box's four corners, rotated about the anchor.
+
+        Rotated because a quarter of the template's lines are turned 90 degrees
+        (the vertical strips), and a box that ignored the rotation would sit
+        flat across the card and pick up clicks that belong to the artwork.
+        """
+        width, height, _ = self.box_mm()
+        angle = math.radians(self.rotation_deg)
+        cos_a, sin_a = math.cos(angle), math.sin(angle)
+        points = []
+        for lx, ly in ((0.0, 0.0), (width, 0.0), (width, height), (0.0, height)):
+            points.append(
+                (
+                    self.x_mm + lx * cos_a - ly * sin_a,
+                    self.y_mm + lx * sin_a + ly * cos_a,
+                )
+            )
+        return points
+
+    def validate(self) -> list[str]:
+        problems: list[str] = []
+        if self.size_mm <= 0:
+            problems.append("文字大小必须为正数")
+        return problems
+
+
+@dataclass
+class PlacementGroup:
+    """Several placements that the user treats as one element.
+
+    The immediate use is a 板画, which is **two** placements -- the white tone
+    on silkscreen and the black on copper -- that are one picture to whoever
+    drew it. Before this they were two rows in the layer list, two things to
+    click, and two things to move, and keeping them registered was entirely on
+    the user.
+
+    The members are :attr:`ImagePlacement.element_id` values rather than
+    indices or object references -- see that field for why.
+
+    ``name`` is what the user calls it, shown in the layer list and written to
+    the board file as EasyEDA Pro's own ``groupName``. Empty is allowed and
+    means "not named yet"; the panel falls back to a generated label rather
+    than inventing a name to store.
+    """
+
+    id: str = ""
+    name: str = ""
+    members: list[str] = field(default_factory=list)
+
+    def validate(self) -> list[str]:
+        problems: list[str] = []
+        if not self.id:
+            problems.append("组合缺少标识")
+        if len(self.members) < 2:
+            # Not an error the user has to fix -- the board prunes these rather
+            # than exporting them -- but it is a state the document should not
+            # report as healthy, because a one-member group means the exit
+            # paths (delete, ungroup, undo) left something behind.
+            problems.append("组合至少需要两个元素")
+        return problems
+
+
+@dataclass
+class CutoutElement:
+    """A hole cut through the board, as the template draws it.
+
+    The 通行证 card has three: a long lanyard opening across the top and a
+    round hanging hole in each top corner.  A cutout is a distinct kind of
+    thing from an outline -- a second, closed ring *inside* the board rather
+    than part of its boundary -- and the exporters have to treat it that way,
+    or the opening is simply not cut.
+
+    ``shape`` is ``"rect"``, ``"circle"`` or ``"obround"``.  The last two are
+    what the source card uses for the lanyard opening and the corner holes; a
+    rectangle would be read by a board house as a routed slot of the wrong
+    shape, and a polygon approximation would leave visible facets at this size.
+    """
+
+    key: str = ""
+    x_mm: float = 0.0
+    y_mm: float = 0.0
+    width_mm: float = 20.0
+    height_mm: float = 3.0
+    corner_radius_mm: float = 0.0
+    """Corner rounding for the rectangular shape."""
+    shape: str = "rect"
+    label: str = "挖槽"
+
+    @property
+    def bounds(self) -> tuple[float, float, float, float]:
+        half_w, half_h = self.width_mm / 2.0, self.height_mm / 2.0
+        return (
+            self.x_mm - half_w,
+            self.y_mm - half_h,
+            self.x_mm + half_w,
+            self.y_mm + half_h,
+        )
+
+    def contains_point(self, x_mm: float, y_mm: float) -> bool:
+        x0, y0, x1, y1 = self.bounds
+        return x0 <= x_mm <= x1 and y0 <= y_mm <= y1
+
+    def ring(self) -> list[tuple[float, float]]:
+        """The opening as a closed ring, counter-clockwise, Y up.
+
+        Wound counter-clockwise while the board's own outline is clockwise: the
+        two have to disagree for a cutting program to read the inner one as a
+        hole instead of a second board.
+        """
+        # Built about the origin first, then moved -- and *only* then.
+        # ``bounds`` already returns absolute coordinates, so offsetting a ring
+        # built from it would add the centre twice and put the slot at roughly
+        # double its Y. That is not a hypothetical: it put a 24 mm slot 43 mm
+        # above the card's top edge, which the outline layer then reported as a
+        # 143 mm-tall board.
+        if self.shape == "circle":
+            ring = circle_ring(0.0, 0.0, max(self.width_mm, self.height_mm) / 2.0, 64)
+        elif self.shape == "obround":
+            ring = _obround_ring(self.width_mm, self.height_mm)
+        elif self.corner_radius_mm > 0:
+            ring = rounded_rect_ring(
+                self.width_mm, self.height_mm, self.corner_radius_mm
+            )
+        else:
+            half_w, half_h = self.width_mm / 2.0, self.height_mm / 2.0
+            ring = [
+                (-half_w, -half_h),
+                (half_w, -half_h),
+                (half_w, half_h),
+                (-half_w, half_h),
+            ]
+        return [(self.x_mm + x, self.y_mm + y) for x, y in ring]
+
+    def validate(self) -> list[str]:
+        problems: list[str] = []
+        if self.shape not in ("rect", "circle", "obround"):
+            problems.append(f"{self.label}的形状无法识别")
+        if self.width_mm <= 0 or self.height_mm <= 0:
+            problems.append(f"{self.label}的尺寸必须为正数")
+        if self.shape == "circle" and not math.isclose(
+            self.width_mm, self.height_mm, rel_tol=0.0, abs_tol=0.02
+        ):
+            problems.append(f"{self.label}是圆孔，宽高必须相等")
+        if self.corner_radius_mm < 0:
+            problems.append(f"{self.label}的圆角不能为负")
+        elif self.corner_radius_mm > min(self.width_mm, self.height_mm) / 2.0:
+            problems.append(
+                f"{self.label}的圆角超过了短边的一半，无法成形"
+            )
+        return problems
+
 
 def drawn_size_mm(
     box_width_mm: float, box_height_mm: float, source_aspect: float
@@ -746,6 +1353,64 @@ class ArtBoard:
     and the selection rules all read one source.
     """
 
+    texts: list[TextElement] = field(default_factory=list)
+    """Text that belongs to the board itself.
+
+    A template card is mostly wording, and the user asked for all of it to be
+    visible and editable rather than baked into the outline. Empty for a board
+    that is not a template.
+    """
+
+    cutouts: list[CutoutElement] = field(default_factory=list)
+    """Openings cut through the board, as distinct from its outline."""
+
+    groups: list[PlacementGroup] = field(default_factory=list)
+    """Sets of placements the user edits as one element.
+
+    板画 is the case this exists for: its two tones are one picture, and moving
+    or deleting them apart leaves a board whose halves no longer line up. The
+    groups are also written to the board file as EasyEDA Pro's own ``GROUP``
+    records, so the editor shows them as one element there too.
+
+    Kept on the document rather than on each placement, for the reason this
+    project keeps making the same choice: a name duplicated across members can
+    be renamed on one of them and then the two disagree, and there is no way to
+    tell which is right.
+    """
+
+    operator_name: str = ""
+    operator_number: str = ""
+    operator_page: str = ""
+    """Which operator the card is being made for.
+
+    Held on the document rather than substituted into the text once, so the
+    tokens stay in ``texts`` and switching operators does not lose the
+    template's own wording. Empty until the user picks one.
+
+    ``operator_page`` is the **identity**; the name is only what the card
+    prints. 暮落 and 暮落(集成战略) have the same name and different wiki pages,
+    and resolving the artwork by name gave the second one the first one's QR
+    code. Older drafts predate the field and fall back to a name lookup.
+    """
+
+    art_choices: dict = field(default_factory=dict)
+    """Per-element overrides for the artwork the card inserts automatically.
+
+    Keyed by kind -- ``"qr"`` / ``"barcode"`` / ``"profession"`` /
+    ``"faction"`` / ``"emblem"`` -- and valued:
+
+    * absent, or ``""`` -- **automatic**, i.e. what the operator's own record
+      says;
+    * ``"none"`` -- the user removed that element from this card;
+    * anything else -- the asset to use instead, by the name the panel lists
+      (a profession, a faction, or ``"on"``/``"off"`` for the crest).
+
+    A mapping rather than one field per element: the panel edits them
+    uniformly, and an element added later needs no new document field. It
+    round-trips through the draft as plain JSON, so old drafts simply have no
+    entry and behave exactly as they did.
+    """
+
     def __init__(
         self,
         outline: BoardOutlineSpec | None = None,
@@ -753,6 +1418,13 @@ class ArtBoard:
         outline_ready: bool = False,
         layers: LayerStack | None = None,
         image: ImagePlacement | None = None,
+        texts: list[TextElement] | None = None,
+        cutouts: list[CutoutElement] | None = None,
+        groups: list[PlacementGroup] | None = None,
+        operator_name: str = "",
+        operator_number: str = "",
+        operator_page: str = "",
+        art_choices: dict | None = None,
     ) -> None:
         # ``image`` is accepted as a convenience for callers that work with a
         # single picture, which is most of them. It seeds the list rather than
@@ -764,6 +1436,17 @@ class ArtBoard:
             self.placements.append(image)
         self.outline_ready = outline_ready
         self.layers = layers if layers is not None else LayerStack()
+        self.texts = list(texts) if texts else []
+        self.cutouts = list(cutouts) if cutouts else []
+        self.groups = list(groups) if groups else []
+        # Minted on demand rather than in ``ImagePlacement.__post_init__``, so
+        # a placement built by a test or a script only gains an identity once
+        # something actually needs to refer to it.
+        self._element_seq = 0
+        self.operator_name = operator_name
+        self.operator_number = operator_number
+        self.operator_page = operator_page
+        self.art_choices = dict(art_choices) if art_choices else {}
         self._silhouette_cache = None
         self._irregular_cache = None
         self._irregular_error = None
@@ -818,19 +1501,300 @@ class ArtBoard:
                 return placement
         return None
 
-    def visible_placements(self) -> list[ImagePlacement]:
-        """Placements whose layer is currently shown, in draw order."""
+    # ------------------------------------------------------------- groups
+
+    def element_id(self, element) -> str:
+        """This object's stable identity, minting one if it has none.
+
+        Takes a placement *or* a text line: both carry ``element_id`` and both
+        can be put in a group, and one helper means the canvas and the model
+        cannot disagree about which id belongs to what.
+
+        Not part of the dataclasses' construction: a uuid generated in
+        ``__post_init__`` would be regenerated by every ``replace()``, every
+        draft load and every undo restore, so a group's member list would go
+        stale the first time the user did anything.
+        """
+        if not getattr(element, "element_id", ""):
+            self._element_seq += 1
+            element.element_id = f"e{self._element_seq}"
+        return element.element_id
+
+    def element_by_id(self, element_id: str):
+        """The placement or text line carrying ``element_id``, or ``None``."""
+        for item in (*self.placements, *self.texts):
+            if item.element_id == element_id:
+                return item
+        return None
+
+    def placement_by_element_id(self, element_id: str) -> ImagePlacement | None:
+        """The placement carrying ``element_id``, or ``None``."""
+        for placement in self.placements:
+            if placement.element_id == element_id:
+                return placement
+        return None
+
+    def group_of(self, element) -> PlacementGroup | None:
+        """The group ``element`` belongs to, or ``None``.
+
+        Membership is looked up by id rather than by index the whole way
+        through, so deleting an object cannot make a group claim a neighbour it
+        never contained.
+        """
+        if element is None or not getattr(element, "element_id", ""):
+            return None
+        return self.group_by_id(element.element_id)
+
+    def group_by_id(self, element_id: str) -> PlacementGroup | None:
+        """The group whose member list holds ``element_id``."""
+        for group in self.groups:
+            if element_id in group.members:
+                return group
+        return None
+
+    def group_members(self, group: PlacementGroup | None) -> list:
+        """The group's live members, in document order.
+
+        ⚠️ **Placements only.** The writers emit ``GROUP`` records over traced
+        geometry, and a text line is written as its own ``STRING`` record with
+        no group reference to set -- so a group containing text cannot yet be
+        expressed in the board file, and reporting text here would make the
+        exporters promise something they cannot write. Text membership is kept
+        on the document and shown in the manager; :meth:`group_all_members`
+        returns it for the UI.
+
+        Order comes from :attr:`placements`, not from the member list: a member
+        list records *which* objects are together, and document order is what
+        the canvas, the layer panel and the exporters all read.
+        """
+        if group is None:
+            return []
+        wanted = set(group.members)
         return [
             item
             for item in self.placements
-            if self.layers.is_visible(item.layer_key)
+            if item.element_id and item.element_id in wanted
         ]
+
+    def group_all_members(self, group: PlacementGroup | None) -> list:
+        """Every live member of ``group`` -- placements and text, in order.
+
+        The canvas and the group manager use this one, because the user picked
+        the text too and a selection that quietly dropped it would make
+        dragging a group leave its captions behind.
+        """
+        if group is None:
+            return []
+        wanted = set(group.members)
+        ordered = [
+            item
+            for item in (*self.placements, *self.texts)
+            if item.element_id and item.element_id in wanted
+        ]
+        return ordered
+
+    def group_label(self, group: PlacementGroup) -> str:
+        """What to call a group on screen.
+
+        A group the user has not named still needs a label -- an unnamed row in
+        the manager would be unclickable -- but the fallback is generated here
+        and never stored, so it cannot go stale against the document.
+        """
+        if group.name.strip():
+            return group.name.strip()
+        index = self.groups.index(group) + 1 if group in self.groups else 1
+        return f"组合 {index}"
+
+    def make_group(
+        self, elements: list, name: str = ""
+    ) -> PlacementGroup | None:
+        """Put ``elements`` into one new group.
+
+        Accepts placements and text lines. Members already in another group are
+        **moved** into the new one rather than being refused: selecting three
+        objects and asking for a group is unambiguous about the outcome, and an
+        object can only be in one group -- that is what the editor's single
+        ``groupId`` field can express.
+
+        Returns ``None`` when there is nothing to do: fewer than two objects
+        that are actually on the board, or fewer than two *distinct* ones.
+        Forming a one-member group would leave a row that can never be used.
+        """
+        known = {id(item): item for item in (*self.placements, *self.texts)}
+        unique: list = []
+        seen: set[int] = set()
+        for element in elements:
+            key = id(element)
+            if key not in known or key in seen:
+                continue
+            seen.add(key)
+            unique.append(known[key])
+        if len(unique) < 2:
+            return None
+
+        self.ungroup(unique, drop_empty=True)
+        from .epru import new_id
+
+        group = PlacementGroup(
+            id=new_id(),
+            name=name.strip(),
+            members=[self.element_id(item) for item in unique],
+        )
+        self.groups.append(group)
+        return group
+
+    def ungroup(
+        self, elements: list, *, drop_empty: bool = True
+    ) -> list[PlacementGroup]:
+        """Take ``elements`` out of whatever group holds them.
+
+        ``drop_empty`` removes a group left with fewer than two members, which
+        is what "解散组合" means. Passing ``False`` keeps the shell so a caller
+        that is about to re-add a different set can reuse the name.
+
+        Returns the groups that were touched, so the caller can report what
+        changed rather than describing the intent.
+        """
+        wanted = {
+            item.element_id
+            for item in elements
+            if getattr(item, "element_id", "")
+        }
+        affected: list[PlacementGroup] = []
+        for group in self.groups:
+            remaining = [mid for mid in group.members if mid not in wanted]
+            if len(remaining) == len(group.members):
+                continue
+            group.members = remaining
+            affected.append(group)
+        if drop_empty:
+            self.groups = [group for group in self.groups if len(group.members) >= 2]
+        return affected
+
+    def dissolve_group(self, group: PlacementGroup) -> bool:
+        """Break one group apart, keeping every placement."""
+        if group not in self.groups:
+            return False
+        self.groups.remove(group)
+        return True
+
+    def rename_group(self, group: PlacementGroup, name: str) -> bool:
+        """Give a group a name. Returns whether it changed."""
+        cleaned = name.strip()
+        if group not in self.groups or group.name == cleaned:
+            return False
+        group.name = cleaned
+        return True
+
+    def prune_groups(self) -> list[PlacementGroup]:
+        """Drop member ids that no longer name a placement, and empty groups.
+
+        Called before the document is written and before the layer list is
+        built. A stale id is invisible on the canvas -- nothing draws for it --
+        but it makes the group's size wrong everywhere it is reported, and the
+        board file would carry a ``GROUP`` record whose members do not all
+        exist.
+        """
+        live = {
+            item.element_id
+            for item in (*self.placements, *self.texts)
+            if item.element_id
+        }
+        removed: list[PlacementGroup] = []
+        for group in self.groups:
+            group.members = [mid for mid in group.members if mid in live]
+        for group in list(self.groups):
+            if len(group.members) < 2:
+                self.groups.remove(group)
+                removed.append(group)
+        return removed
+
+    def visible_placements(self) -> list[ImagePlacement]:
+        """Placements whose layer is currently shown, in draw order.
+
+        Sorted by the layer stack -- copper over silkscreen over mask -- rather
+        than by the order the objects happen to sit in :attr:`placements`.
+        Insertion order is not a stacking decision: importing a silkscreen
+        picture after a copper one used to paint it on top, so which of two
+        overlapping objects won depended on which was imported last.
+        """
+        return self.in_layer_order(
+            item
+            for item in self.placements
+            if self.layers.is_visible(item.layer_key)
+        )
+
+    @staticmethod
+    def in_layer_order(items) -> list:
+        """Sort drawables bottom-to-top by the layer stack, stably.
+
+        Stable, so objects on one layer keep the order they were created in --
+        within a layer that *is* the stacking decision the user made.
+        """
+        from .design_layers import paint_rank
+
+        return sorted(items, key=lambda item: paint_rank(item.layer_key))
 
     def validate(self) -> list[str]:
         problems = list(self.outline.validate())
         for placement in self.placements:
             problems.extend(placement.validate())
+        for element in self.texts:
+            problems.extend(element.validate())
+        for cutout in self.cutouts:
+            problems.extend(cutout.validate())
+        for group in self.groups:
+            problems.extend(group.validate())
         return problems
+
+    # -------------------------------------------------- text and cutouts
+
+    def visible_texts(self) -> list[TextElement]:
+        """Text lines whose layer is showing, in draw order.
+
+        Layer-ordered for the same reason as :meth:`visible_placements`: a line
+        does not go on top by being later in the list.
+        """
+        return self.in_layer_order(
+            item for item in self.texts if self.layers.is_visible(item.layer_key)
+        )
+
+    def text_line(self, x_mm: float, y_mm: float) -> TextElement | None:
+        """The topmost text line under a point, or ``None``.
+
+        Checked before the artwork when picking: the lines are thin and sit on
+        top of the picture, so a click that lands on one is a click on the
+        words rather than on whatever is behind them.
+        """
+        for item in reversed(self.texts):
+            if not self.layers.selectable(item.layer_key):
+                continue
+            if item.contains_point(x_mm, y_mm):
+                return item
+        return None
+
+    def cutout(self, key: str) -> CutoutElement | None:
+        """One cutout by its template key, for the panel to bind to."""
+        for item in self.cutouts:
+            if item.key == key:
+                return item
+        return None
+
+    def cutout_at(self, x_mm: float, y_mm: float) -> CutoutElement | None:
+        """The cutout under a point, if any."""
+        for item in reversed(self.cutouts):
+            if item.contains_point(x_mm, y_mm):
+                return item
+        return None
+
+    def cutout_rings(self) -> list[list[tuple[float, float]]]:
+        """Every opening as a closed ring, for the canvas and both exporters.
+
+        One accessor rather than three readers of ``self.cutouts``: a hole that
+        the canvas draws but the Gerber writer forgets is a board that comes
+        back solid, and that is the failure this method exists to prevent.
+        """
+        return [item.ring() for item in self.cutouts]
 
     def outline_polygon(self) -> list[tuple[float, float]]:
         """Board outline vertices in millimetres.
@@ -849,6 +1813,20 @@ class ArtBoard:
         # polygon, or the traced composition), and a caller that edited the
         # list in place would be editing what every later frame draws.
         return list(self._standee_outline(self._base_outline()))
+
+    def outline_path(self) -> list[Any]:
+        """The outline for the writer, keeping native arcs when it can.
+
+        A standee tab is a separate polygon welded onto the board, so it has no
+        arc metadata to preserve; that path falls back to the sampled ring.
+        """
+        if not self.outline_ready:
+            return []
+        if self.outline.standee:
+            from .primitives import Point, polyline_path
+
+            return polyline_path([Point(x, y) for x, y in self.outline_polygon()])
+        return self.outline.outline_path()
 
     def _base_outline(self) -> list[tuple[float, float]]:
         """The board without its standee tab.
@@ -872,6 +1850,9 @@ class ArtBoard:
             spec.width_mm,
             spec.height_mm,
             spec.corner_radius_mm,
+            spec.template,
+            spec.template_outline,
+            spec.template_arcs,
         )
         if self._parametric_cache is not None and self._parametric_cache[0] == key:
             return self._parametric_cache[1]
@@ -1016,6 +1997,10 @@ class ArtBoard:
             spec.height_mm,
             spec.corner_radius_mm,
             spec.base_top_ratio,
+            # The template ring is part of the outline, so it belongs in the
+            # key: omitting it would keep the cached ring of the template that
+            # was applied first.
+            spec.template_outline,
         )
 
     def _traced_silhouette(self) -> list[tuple[float, float]]:

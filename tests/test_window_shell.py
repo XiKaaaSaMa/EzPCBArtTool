@@ -50,7 +50,14 @@ def window(app, tmp_path):
     win.show()
     app.processEvents()
     yield win
-    win.hide()
+    # ⚠️ Hidden, then actually destroyed. Hiding alone leaves the window and
+    # all of its widgets alive for the rest of the session, and a theme switch
+    # re-polishes every live widget -- so a run that accumulates hidden windows
+    # makes each later switch take seconds instead of milliseconds. `deleteLater`
+    # rather than `close()` because closing raises the unsaved-changes question.
+    from conftest import release_window
+
+    release_window(win)
 
 
 @pytest.fixture
@@ -212,6 +219,18 @@ def test_saving_as_a_project_names_the_tab_after_the_file(
 
 
 def test_export_writes_a_file_and_says_what_is_in_it(window, tmp_path, monkeypatch):
+    """The save must report what it wrote -- in the status bar, not a dialog.
+
+    ⚠️ **The report moved out of the dialog at the user's request**
+    (「只提示工程保存完成」): a card with one misplaced illustration appended the
+    writer's whole log to the message box, which ran to a page of near-identical
+    lines. The dialog now says only that the file was saved, and the detail goes
+    to the status bar.
+
+    The *intent* of this test is unchanged and is what matters: the user is
+    still told what went into the file. Asserting it against the status bar
+    keeps that true without re-introducing the wall of text.
+    """
     from pcbart.artboard import BoardOutlineSpec
 
     window.design_canvas.board.outline = BoardOutlineSpec(width_mm=50, height_mm=30)
@@ -234,7 +253,18 @@ def test_export_writes_a_file_and_says_what_is_in_it(window, tmp_path, monkeypat
 
     assert result == str(target)
     assert target.exists()
-    assert any("50.0" in message for message in messages)
+
+    # The dialog stays short: just the fact that the save happened.
+    assert messages and "已保存" in messages[-1], (
+        f"对话应当只说保存完成，实际 {messages!r}"
+    )
+    assert "50.0" not in messages[-1], (
+        f"板框尺寸不该再塞进对话（用户要求只提示保存完成），实际 {messages[-1]!r}"
+    )
+
+    # And the fact is still reported somewhere the user can read.
+    status = window.statusBar().currentMessage()
+    assert "50.0" in status, f"状态栏应当写明写出的板框尺寸，实际 {status!r}"
 
 
 def test_opening_a_picture_offers_the_file_dialog(window, monkeypatch):

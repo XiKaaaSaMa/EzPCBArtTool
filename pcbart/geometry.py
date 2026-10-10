@@ -26,17 +26,25 @@ counter-clockwise holes.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Iterable, Sequence
 
 from .primitives import Mode
 
 __all__ = [
     "Ring",
+    "ArcRing",
     "signed_area",
     "ensure_ccw",
     "ensure_cw",
     "is_ccw",
     "normalize_complex_polygon",
+    "normalize_arc_polygon",
+    "reverse_arc_ring",
+    "signed_area_arc",
+    "is_ccw_arc",
+    "arc_ring_to_path",
+    "arc_polygon_to_path",
     "rect_ring",
     "circle_ring",
     "rounded_rect_ring",
@@ -45,9 +53,43 @@ __all__ = [
     "ring_to_path",
     "complex_polygon_to_path",
     "path_to_rings",
+    "sample_arc",
+    "sample_cubic",
+    "densify_path",
+    "densify_ring",
 ]
 
 Ring = Sequence[tuple[float, float]]
+
+
+@dataclass
+class ArcRing:
+    """A closed ring whose edges are **lines and circular arcs**.
+
+    ``sweeps[i]`` is the curve *arriving at* ``points[i]``; index 0 is the
+    closing segment back to the first point. ``0.0`` means a straight edge.
+
+    Why this exists beside :class:`Ring`: a chord-only polygon can only
+    approximate a curve by adding vertices, so the pixel grid's staircase
+    survives simplification -- either that, or the tolerance is raised until
+    real corners are rounded off. Carrying the arc lets the editor draw the
+    curve the trace actually describes. See :mod:`pcbart.vtrace`.
+    """
+
+    points: list[tuple[float, float]]
+    sweeps: list[float]
+
+    def __post_init__(self) -> None:
+        if len(self.points) != len(self.sweeps):
+            raise ValueError(
+                f"弧环的点数与扫向数不一致：{len(self.points)} 点 / "
+                f"{len(self.sweeps)} 扫向"
+            )
+
+    @property
+    def plain(self) -> list[tuple[float, float]]:
+        """The vertices alone, for measuring and for winding."""
+        return list(self.points)
 
 
 def signed_area(ring: Ring) -> float:
@@ -106,6 +148,110 @@ def normalize_complex_polygon(
     return result
 
 
+def reverse_arc_ring(ring: ArcRing) -> ArcRing:
+    """The same closed curve travelled the other way, arcs included.
+
+    ⚠️ **Reversing a ring reverses every sweep.** The sweep is signed relative
+    to the direction of travel, so walking the same arc backwards turns a
+    counter-clockwise 90 degrees into a clockwise 90. A version that reversed
+    the points and kept the sweeps produced a ring that read as its own
+    complement -- every arc bulging to the wrong side of its chord.
+
+    ⚠️ **And the sweeps have to shift by one, not stay put.** ``sweeps[i]``
+    belongs to the segment *arriving at* ``points[i]``, so on the reversed ring
+    the segment arriving at new vertex ``j`` is the reverse of the old segment
+    arriving at ``points[(n-j) % n]`` -- not the one at ``n-1-j``. Off by one
+    there pairs every arc with the wrong chord: the half-disc came back with
+    its arc and its straight edge swapped, which draws a different shape.
+    """
+    count = len(ring.points)
+    if count < 2:
+        return ArcRing(list(ring.points), list(ring.sweeps))
+    points = list(reversed(ring.points))
+    sweeps = [-ring.sweeps[(count - index) % count] for index in range(count)]
+    return ArcRing(points, sweeps)
+
+
+def signed_area_arc(ring: ArcRing) -> float:
+    """Enclosed area of a ring with arcs, **signed**, in the design frame.
+
+    ⚠️ **A two-vertex circle has zero vertices-area but a real area.** The
+    points alone span no polygon at all: a circle written as two points joined
+    by two 180-degree sweeps has a chord area of exactly 0, and a half-disc's
+    chords cancel to 0 too. Deciding the winding from the vertices therefore
+    answered "clockwise" for both directions, and the normaliser left the ring
+    as it found it -- which is a hole that fills in, or a shape that becomes
+    its own complement.
+
+    The true area adds each curved segment's **circular segment** on top of the
+    chord contribution: ``(r^2/2) * (theta - sin theta)`` for a segment
+    sweeping ``theta`` radians. For a two-arc circle that is ``2 * (r^2/2) * pi
+    = pi * r^2``, and for a half-disc ``(r^2/2) * pi`` -- both exact.
+    """
+    import math
+
+    points = ring.points
+    count = len(points)
+    total = 0.0
+    for index in range(count):
+        x1, y1 = points[index - 1]
+        x2, y2 = points[index]
+        # The chord's own contribution, exactly as for a plain polygon.
+        total += x1 * y2 - x2 * y1
+        sweep = float(ring.sweeps[index])
+        if abs(sweep) < 1e-9:
+            continue
+        chord = math.hypot(x2 - x1, y2 - y1)
+        half = math.radians(sweep) / 2.0
+        sin_half = math.sin(half)
+        if chord <= 1e-12 or abs(sin_half) <= 1e-12:
+            continue
+        radius = chord / (2.0 * sin_half)
+        theta = math.radians(sweep)
+        total += radius * radius * (theta - math.sin(theta))
+    return total / 2.0
+
+
+def is_ccw_arc(ring: ArcRing) -> bool:
+    """Whether an arc ring is wound counter-clockwise."""
+    return signed_area_arc(ring) > 0
+
+
+def normalize_arc_polygon(
+    outer: ArcRing,
+    holes: Iterable[ArcRing] = (),
+    islands: Iterable[ArcRing] = (),
+) -> list[ArcRing]:
+    """Arc rings wound the way :func:`normalize_complex_polygon` winds plains.
+
+    Outer clockwise, holes counter-clockwise, islands like the outer ring --
+    the same rule, except that a ring being turned around has to have its
+    sweeps negated as well. See :func:`reverse_arc_ring`.
+
+    ⚠️ **An arc ring needs only two vertices, where a chord ring needs three.**
+    Two points joined by two 180-degree sweeps is a circle, and two points
+    joined by one sweep and one chord is a half-disc -- both perfectly good
+    areas that the plain-polygon ``>= 3`` rule would silently drop.
+
+    The winding test is :func:`is_ccw_arc`, not :func:`is_ccw`: on rings like
+    those two the vertex area is zero and the plain test answers arbitrarily.
+    """
+    result = [
+        outer if not is_ccw_arc(outer) else reverse_arc_ring(outer)
+    ]
+    for island in islands:
+        if len(island.points) >= 2:
+            result.append(
+                island if not is_ccw_arc(island) else reverse_arc_ring(island)
+            )
+    for hole in holes:
+        if len(hole.points) >= 2:
+            result.append(
+                hole if is_ccw_arc(hole) else reverse_arc_ring(hole)
+            )
+    return result
+
+
 def normalize_outline_rings(
     outer: Ring,
     holes: Iterable[Ring] = (),
@@ -131,6 +277,11 @@ def ring_to_path(ring: Ring) -> list[float | str]:
 
     The ``R`` and ``CIRCLE`` forms are inherently closed and do not repeat a
     vertex; this function only produces ``L`` streams.
+
+    For rings whose vertices are joined by arcs, use
+    :func:`arc_ring_to_path` instead: a chord-only stream turns every curve
+    into a chain of short straight segments, which is what makes a traced
+    picture look ragged along its edges.
     """
     points = list(ring)
     if not points:
@@ -139,6 +290,58 @@ def ring_to_path(ring: Ring) -> list[float | str]:
     for x, y in points[1:]:
         out.extend([x, y])
     if len(points) > 1 and points[-1] != points[0]:
+        out.extend([points[0][0], points[0][1]])
+    return out
+
+
+def arc_polygon_to_path(rings: Sequence[ArcRing]) -> list[list[float | str]]:
+    """A complex polygon of arc rings, in the shape a ``FILL`` body expects.
+
+    The counterpart of :func:`complex_polygon_to_path` for geometry that
+    carries curves: one token stream per ring, first ring the area and the rest
+    its holes.
+    """
+    return [arc_ring_to_path(ring.points, ring.sweeps) for ring in rings]
+
+
+def arc_ring_to_path(ring: Ring, sweeps: Sequence[float]) -> list[float | str]:
+    """A closed ring whose segments are **arcs**, in the editor's own notation.
+
+    The form is the one the template files use::
+
+        [x0, y0, "L", x1, y1, "ARC", sweep, x2, y2, "L", x3, y3, ...]
+
+    A point list where ``"ARC", <sweep>, x, y`` means "from the current point,
+    sweep ``sweep`` degrees to ``(x, y)``". Measured from the source template's
+    own ``FILL`` record: one ring mixes ``L`` and ``ARC`` segments, and the
+    ARC's coordinates are an **absolute endpoint**, not an offset.
+
+    ⚠️ **This is why traced artwork looked ragged.** ``findContours`` walks the
+    pixel boundary, so a soft edge arrives as a staircase, and with chords
+    alone the only way to smooth it is to move the vertices -- which either
+    keeps the staircase (tolerance too small) or rounds off real corners (too
+    large). Arcs let the editor draw the curve the fit describes.
+
+    ``sweeps`` has one entry per vertex, the first being the closing segment
+    (from the last point back to the first). A zero sweep is written as a
+    straight ``L``.
+    """
+    points = list(ring)
+    if not points or len(sweeps) != len(points):
+        return ring_to_path(ring)
+
+    out: list[float | str] = [points[0][0], points[0][1], Mode.L]
+    for index in range(1, len(points)):
+        x, y = points[index]
+        sweep = float(sweeps[index])
+        if abs(sweep) < 1e-6:
+            out.extend([x, y])
+        else:
+            out.extend([Mode.ARC, sweep, x, y])
+    closing = float(sweeps[0])
+    if abs(closing) >= 1e-6:
+        out.extend([Mode.ARC, closing, points[0][0], points[0][1]])
+    elif points[-1] != points[0]:
         out.extend([points[0][0], points[0][1]])
     return out
 
@@ -169,6 +372,224 @@ def path_to_rings(path: object) -> list[list[tuple[float, float]]]:
     return [ring for ring in rings if ring]
 
 
+def _rect_ring(
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    rotation_deg: float = 0.0,
+) -> list[tuple[float, float]]:
+    """A standalone ``R`` rectangle in a Y-up frame.
+
+    ``(x, y)`` is the top-left anchor and the rectangle grows downward, so the
+    local corners use ``-height`` for the bottom edge.  A non-zero rotation is
+    applied about that anchor, matching the file's own path grammar.
+    """
+    import math
+
+    angle = math.radians(float(rotation_deg))
+    cos_a, sin_a = math.cos(angle), math.sin(angle)
+    local = ((0.0, 0.0), (width, 0.0), (width, -height), (0.0, -height))
+    return [
+        (
+            x + u * cos_a - v * sin_a,
+            y + u * sin_a + v * cos_a,
+        )
+        for u, v in local
+    ]
+
+
+def sample_arc(
+    start: tuple[float, float],
+    end: tuple[float, float],
+    sweep_deg: float,
+    segments: int = 16,
+) -> list[tuple[float, float]]:
+    """Points along a circular arc, including its two endpoints.
+
+    ``sweep_deg`` is signed and measured counter-clockwise in the Y-up frame
+    the model works in.  EasyEDA stores the angle in the file's Y-down frame,
+    so callers converting a record pass the negated value; that sign is what
+    decides which side of the chord the centre sits on.
+    """
+    import math
+
+    if segments < 2:
+        segments = 2
+    sweep = math.radians(float(sweep_deg))
+    dx = float(end[0]) - float(start[0])
+    dy = float(end[1]) - float(start[1])
+    chord = math.hypot(dx, dy)
+    if chord <= 1e-12 or abs(sweep) <= 1e-12:
+        return [(float(start[0]), float(start[1])), (float(end[0]), float(end[1]))]
+
+    half = sweep / 2.0
+    sin_half = math.sin(half)
+    if abs(sin_half) <= 1e-12:
+        return [(float(start[0]), float(start[1])), (float(end[0]), float(end[1]))]
+    radius = abs(chord / (2.0 * sin_half))
+    mid_x = (start[0] + end[0]) / 2.0
+    mid_y = (start[1] + end[1]) / 2.0
+    nx = -dy / chord
+    ny = dx / chord
+    height = math.sqrt(max(radius * radius - (chord / 2.0) ** 2, 0.0))
+    sign = 1.0 if sweep > 0 else -1.0
+    centre_x = mid_x + sign * height * nx
+    centre_y = mid_y + sign * height * ny
+
+    start_angle = math.atan2(start[1] - centre_y, start[0] - centre_x)
+    out = []
+    for index in range(segments + 1):
+        angle = start_angle + sweep * index / segments
+        out.append(
+            (
+                centre_x + radius * math.cos(angle),
+                centre_y + radius * math.sin(angle),
+            )
+        )
+    return out
+
+
+def sample_cubic(
+    start: tuple[float, float],
+    control1: tuple[float, float],
+    control2: tuple[float, float],
+    end: tuple[float, float],
+    segments: int = 16,
+) -> list[tuple[float, float]]:
+    """Points along a cubic Bezier, including both endpoints.
+
+    EasyEDA stores these as ``x y C x1 y1 x2 y2 x3 y3``: the current point is
+    the start, the next three pairs are the two controls and the endpoint.  A
+    decoder that treats the controls as ordinary vertices turns a logo or a
+    glyph into a fan of chords, and filling that fan is what produced the
+    ellipse blobs on the card's side text.
+    """
+    if segments < 2:
+        segments = 2
+    out: list[tuple[float, float]] = []
+    for index in range(segments + 1):
+        t = index / segments
+        u = 1.0 - t
+        x = (
+            u * u * u * start[0]
+            + 3.0 * u * u * t * control1[0]
+            + 3.0 * u * t * t * control2[0]
+            + t * t * t * end[0]
+        )
+        y = (
+            u * u * u * start[1]
+            + 3.0 * u * u * t * control1[1]
+            + 3.0 * u * t * t * control2[1]
+            + t * t * t * end[1]
+        )
+        out.append((x, y))
+    return out
+
+
+def densify_path(node: object, segments: int = 16) -> list[list[tuple[float, float]]]:
+    """Decode a path token stream into polylines, sampling arcs.
+
+    A plain ``L`` stream loses every corner radius because an ``ARC`` token
+    stores only its endpoint in the numeric run.  Sampling the curve here keeps
+    a canvas preview and a rebuilt file from turning a rounded card corner into
+    a diagonal cut.
+    """
+    if not isinstance(node, list) or not node:
+        return []
+    if isinstance(node[0], list):
+        rings: list[list[tuple[float, float]]] = []
+        for item in node:
+            rings.extend(densify_path(item, segments))
+        return rings
+
+    head = node[0]
+    if head == Mode.CIRCLE and len(node) >= 4:
+        import math
+
+        cx, cy, radius = float(node[1]), float(node[2]), float(node[3])
+        steps = max(16, segments * 2)
+        return [
+            [
+                (
+                    cx + radius * math.cos(2 * math.pi * i / steps),
+                    cy + radius * math.sin(2 * math.pi * i / steps),
+                )
+                for i in range(steps)
+            ]
+        ]
+    if head == Mode.R and len(node) >= 5:
+        x, y, width, height = (float(value) for value in node[1:5])
+        rotation = float(node[5]) if len(node) >= 6 else 0.0
+        return [_rect_ring(x, y, width, height, rotation)]
+
+    points: list[tuple[float, float]] = []
+    pending: list[float] = []
+    index = 0
+
+    def flush() -> None:
+        for offset in range(0, len(pending) - 1, 2):
+            points.append((pending[offset], pending[offset + 1]))
+
+    while index < len(node):
+        item = node[index]
+        if isinstance(item, str):
+            flush()
+            pending.clear()
+            index += 1
+            if item in (Mode.ARC, Mode.CARC) and index + 2 < len(node):
+                angle = -float(node[index])
+                end = (float(node[index + 1]), float(node[index + 2]))
+                if points:
+                    points.extend(sample_arc(points[-1], end, angle, segments)[1:])
+                else:
+                    points.append(end)
+                index += 3
+            elif item == Mode.C and index + 5 < len(node):
+                control1 = (float(node[index]), float(node[index + 1]))
+                control2 = (float(node[index + 2]), float(node[index + 3]))
+                end = (float(node[index + 4]), float(node[index + 5]))
+                if points:
+                    points.extend(
+                        sample_cubic(points[-1], control1, control2, end, segments)[1:]
+                    )
+                else:
+                    points.append(end)
+                index += 6
+            continue
+        if isinstance(item, (int, float)) and not isinstance(item, bool):
+            pending.append(float(item))
+        index += 1
+    flush()
+    return [points] if points else []
+
+
+def densify_ring(
+    points: Sequence[tuple[float, float]],
+    arcs: Sequence[float | None] = (),
+    segments: int = 16,
+) -> list[tuple[float, float]]:
+    """Densify a ring given its vertices and one arc sweep per segment.
+
+    ``arcs[i]`` describes the segment from ``points[i]`` to
+    ``points[(i + 1) % len(points)]``; ``None`` keeps a straight edge.
+    """
+    vertices = [(float(x), float(y)) for x, y in points]
+    if len(vertices) < 2:
+        return vertices
+    out = [vertices[0]]
+    for index, start in enumerate(vertices):
+        end = vertices[(index + 1) % len(vertices)]
+        sweep = arcs[index] if index < len(arcs) else None
+        if sweep is None:
+            out.append(end)
+        else:
+            out.extend(sample_arc(start, end, -float(sweep), segments)[1:])
+    if out and out[-1] == out[0]:
+        out.pop()
+    return out
+
+
 def _decode_single(node: list) -> list[tuple[float, float]]:
     if not node:
         return []
@@ -180,7 +601,8 @@ def _decode_single(node: list) -> list[tuple[float, float]]:
 
     if head == Mode.R and len(node) >= 5:
         x, y, w, h = float(node[1]), float(node[2]), float(node[3]), float(node[4])
-        return [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
+        rotation = float(node[5]) if len(node) >= 6 else 0.0
+        return _rect_ring(x, y, w, h, rotation)
 
     points: list[tuple[float, float]] = []
     pending: list[float] = []

@@ -73,7 +73,9 @@ def window(app, tmp_path):
     refresh_project_tabs(win)
     yield win
     # Closing would open the unsaved-changes question; hiding avoids the modal.
-    win.hide()
+    from conftest import release_window
+
+    release_window(win)
 
 
 def size_board(window, width: float) -> None:
