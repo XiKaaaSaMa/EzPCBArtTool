@@ -29,22 +29,59 @@
 > - 正式版 → `1.0.0`
 
 **当前代码版本：`1.0.0`**（`pcbart/__init__.py` 的 `__version__`）。
-用户 2026-10-04 指定这一版为 **1.0.0（正式版）**，**但还没打包** ——
-用户明确「等我确认 bug 修完了再打包」。
 规则：**打包类型由用户决定，版本号跟着类型走**；`__version__` 只是"现在
 代码是什么版本"，安装包用 `/DAppVersion=` 单独给。
 
-⚠️ **已交付的 0.1.1 安装包落后于当前代码。** 它不含之后做完的这些：
+## 一·二、已交付版本（2026-10-10 更新）
 
-- **线稿改为填充色块读法**（深浅直接黑白替代）
-- 画布快捷键与右键菜单、两色图片自动免处理
-- 一批参数自适应加固（去碎屑核径按分辨率、整图统计限分辨率）
-- **拖图片边框改尺寸时画布不再跟着缩放**（原先边框追不上鼠标）
-- **画布黑底 + X/Y 坐标轴**（带刻度、毫米读数、方向箭头）
-- **由比滨线稿修复**（阈值按抠图主体算、轮廓只画最外层）
-- **界面重做：Material Design 3 + Iconoir 图标**
-- **界面配色可选**（18 预设 + 明暗 + 高级自定义），换色即时生效
-- **勾选框 / 滑块跟随主题色**（且修好了"启动时没应用主题"）
+| 版本 | 类型 | 安装包 | 归档位置 |
+|---|---|---|---|
+| **1.0.0** | 正式版 | `PCB艺术板工具_v1.0.0_安装包.exe`（**50.14 MB**） | `安装包保存区\正式版\` |
+| 0.1.1 | 公测版 | 45.7 MB | `安装包保存区\公测\` |
+| 0.1.0 | 公测版 | 45.6 MB | `安装包保存区\公测\` |
+| 0.0.1 / 0.0.2 | 内测版 | 45.5 MB | `安装包保存区\内测\` |
+
+**1.0.0 的 SHA-256**
+（`fe3be936f6f8d3669a23c6b346fc4eb5d47cca16490a4f111090f7f9675645fd`）：
+
+- GitHub Release：`https://github.com/XiKaaaSaMa/EzPCBArtTool/releases/download/v1.0.0/PCB._v1.0.0_.exe`
+- 网站下载源（CNB）：`https://cnb.cool/xikaaa/Ez_PCBart/-/releases/download/v1.0.0/PCB._v1.0.0_.exe`
+  （匿名实测：HTTP 200、**5.0 MB/s**、下载后 SHA-256 与上值一致）
+
+### ⚠️ 1.0.0 打包时踩到的两个坑
+
+1. **Inno Setup 的参数在 Git Bash 里会被路径转换吃掉**。
+   `ISCC.exe /DAppVersion=1.0.0 installer.iss` 会报
+   `You may not specify more than one script filename` —— MSYS2 把
+   `/DAppVersion=1.0.0` 当路径转成了 `C:/...`。必须加 `MSYS_NO_PATHCONV=1`。
+2. **静默安装不要用 `cmd //c` 拼引号**（路径会被再解析一次，装到默认位置且
+   不留日志）。用 PowerShell 的 `Start-Process -ArgumentList` 传参数最稳：
+   ```powershell
+   $p = Start-Process -FilePath '.\PCB艺术板工具_v1.0.0_安装包.exe' -PassThru -Wait -ArgumentList `
+        '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/LOG=<日志路径>','/DIR=<安装路径>'
+   ```
+   首次退出时旧包被残留的安装进程锁住（`Device or resource busy`），
+   结束该进程后才能重打。
+
+### ✅ 1.0.0 交付验收记录（2026-10-10）
+
+- 全量测试 **1723 passed / 2 skipped**（源码目录与打包目录各跑一次，结果相同）
+- **全新安装 → 启动 → 导出 → 第三方回读 → 卸载** 全流程走通：
+  - 从安装目录启动并截图，与开发目录产物**逐字节一致**
+  - 安装目录运行时**零写入**（159 个文件，启动后仍是 159 个）
+  - 缓存正确落在 `%LOCALAPPDATA%\PCB艺术板工具\`
+  - 无头 Gerber 导出 → `gerbonara` 回读板框 **75.979 × 76.200 mm**，
+    与图片比例算出的期望值一致
+  - 卸载后**零残留**：程序目录 0 文件、无缓存、无开始菜单项
+- **GPL-3.0 合规**：`LICENSE` 随安装包写入 `{app}\LICENSE.txt`，
+  开始菜单加「许可证（GPL-3.0）」入口，关于对话框写明许可证与源码地址
+
+### ⚠️ GPL-3.0 是交付要求的一部分，不要漏
+
+软件以 GPL-3.0 发布（2026-10-10 用户选定）。GPL 第 4 条要求
+**随程序一并提供许可证副本**，所以 `installer.iss` 的 `[Files]` 里有一条
+`Source: "LICENSE"`。重新打包时如果 `PCB工具打包测试\` 下缺 `LICENSE`，
+编译会直接失败——这是刻意的。
 
 ⚠️ 主题相关的**新模块必须一起同步**，漏了会在启动时报
 `ModuleNotFoundError`：`pcbart/ui_theme.py`、`pcbart/ui_icons.py`、
@@ -53,6 +90,23 @@
 ⚠️ **打包前必须先把源码同步到 `PCB工具打包测试\`**，
 否则会把旧行为又发出一次。这两份源码**不同步是常态**——
 `PCB工具打包测试\` 只在打包时更新。
+
+⚠️ **2026-10-10 同步方式有了坑**：源码目录新增了 `LICENSE` 与
+`pcbart/models/` 等文件，用 tar 同步时务必**排除** `out/`（866 MB 产物）、
+`.git`、`推GitHub/`、`AGENTS.local.md`，否则会把本机私有内容带进打包目录：
+
+```bash
+cd "P:/Zcode开发专用文件夹/PCB艺术板工具"
+tar -cf - --exclude=.git --exclude=__pycache__ --exclude=.pytest_cache \
+  --exclude=out --exclude=推GitHub --exclude=AGENTS.local.md . \
+  | (cd "P:/Zcode开发专用文件夹/PCB工具打包测试" && tar -xf -)
+```
+
+同步后**逐文件比对**（两侧各自 `find` 列表做差集），确认没有"源码摘了、
+打包目录还留着"的陈旧模块。`PCB工具打包测试\` 里允许存在、
+源码里没有的文件只有这几个打包专用项：
+`PCB艺术板工具.spec`、`installer.iss`、`main.py`（源码也有）、
+`make_icon.py`、`icon/`、历史安装包与 `_*.png` 截图。
 
 ⚠️ 打包前先比对一下，确认同步真的发生了：
 
