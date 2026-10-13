@@ -129,6 +129,41 @@ def imread_unicode(path: str | Path, flags: int):
     return image
 
 
+def flatten_alpha(
+    image: np.ndarray,
+    alpha: np.ndarray | None,
+    background: tuple[int, int, int] = (255, 255, 255),
+) -> np.ndarray:
+    """Composite straight alpha onto a solid background, per pixel:
+
+        out = src * (a / 255) + bg * (1 - a / 255)
+
+    Straight (non-premultiplied) alpha is what PNG stores, so that is the whole
+    formula -- ``cv2.addWeighted`` cannot express it because the weight is per
+    pixel, and the premultiplied variants would darken the rim. ``None`` alpha
+    passes the image through untouched.
+
+    Why composite at all: a game-asset PNG keeps *colour* underneath its
+    transparent pixels -- measured on a library illustration, the fully
+    transparent 73.6% of the picture averages RGB 165-179 with recognisable
+    fragments of the weapon in it. Every path that drops the alpha
+    (``COLOR_BGRA2BGR``, PIL's ``convert("RGB")``, or simply using the colour
+    plane for statistics) turns that residue into a visible gold background.
+
+    ⚠️ **This is the one implementation, and it runs once, at the boundary
+    that splits a picture into colour and alpha.** Compositing twice washes
+    the translucent rim out -- a 50% edge pixel would end at 25% of its colour
+    instead of 50% -- so downstream code keeps ``alpha`` for the masks only
+    and never re-applies it to the colour.
+    """
+    if alpha is None:
+        return image
+    a = (alpha.astype(np.float32) / 255.0)[:, :, None]
+    bg = np.asarray(background, dtype=np.float32).reshape(1, 1, 3)
+    out = image.astype(np.float32) * a + bg * (1.0 - a)
+    return np.clip(np.round(out), 0, 255).astype(np.uint8)
+
+
 def imwrite_unicode(path: str | Path, image, ext: str | None = None) -> None:
     """Write an image to a path that may contain non-ASCII characters."""
     import cv2

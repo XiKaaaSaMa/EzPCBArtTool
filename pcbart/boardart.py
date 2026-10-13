@@ -279,8 +279,10 @@ def board_art(
 ) -> BoardArt:
     """Convert an illustration to the board-painting two-tone form.
 
-    ``image`` may be BGR, BGRA or greyscale; ``alpha`` can be passed separately
-    for a picture already split into colour and transparency.
+    ``image`` may be BGR, BGRA or greyscale. A BGRA picture is flattened onto
+    white here (its alpha is a boundary this function owns); an ``alpha``
+    passed separately promises the caller already flattened the colour --
+    see :func:`pcbart.image_prep.flatten_alpha` for why it must happen once.
 
     ``px_per_mm`` is the resolution the artwork will be printed at, and is what
     turns :attr:`BoardArtParams.min_feature_mm` into pixels. Without it the
@@ -295,8 +297,10 @@ def board_art(
     params = (params or BoardArtParams()).normalised()
 
     if image.ndim == 3 and image.shape[2] == 4:
+        from .image_prep import flatten_alpha
+
         alpha = image[:, :, 3]
-        image = image[:, :, :3]
+        image = flatten_alpha(image[:, :, :3], alpha)
 
     image, alpha = _flip(image, alpha, params)
 

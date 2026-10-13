@@ -3581,18 +3581,29 @@ class PreprocessPanel(FloatingPanel):
         State is committed only after the first conversion succeeds, so a
         failure cannot leave the panel holding half-loaded data.
         """
-        from pcbart.image_prep import imread_unicode
+        from pcbart.image_prep import flatten_alpha, imread_unicode
 
         try:
             raw = imread_unicode(path, cv2.IMREAD_UNCHANGED)
         except ValueError as exc:
             QMessageBox.warning(self, "无法载入图片", str(exc))
             return False
+        if raw.dtype != np.uint8:
+            # 16 位等：先归一到 8 位，之后的合成与整条管线都按 8 位走。
+            raw = np.clip(
+                np.round(raw.astype(np.float32) / np.iinfo(raw.dtype).max * 255.0),
+                0,
+                255,
+            ).astype(np.uint8)
 
         # Keep the original pixels: the preview is recomputed from source each
         # time a control moves, never from the previous preview.
         if raw.ndim == 3 and raw.shape[2] == 4:
             bgr, alpha = raw[:, :, :3], raw[:, :, 3]
+        elif raw.ndim == 3 and raw.shape[2] == 2:
+            # 灰度 + alpha：IMREAD_UNCHANGED 对 GrayA PNG 给出的就是这种形态。
+            bgr = cv2.cvtColor(raw[:, :, 0], cv2.COLOR_GRAY2BGR)
+            alpha = raw[:, :, 1]
         elif raw.ndim == 3:
             bgr, alpha = raw, None
         else:
@@ -3601,6 +3612,16 @@ class PreprocessPanel(FloatingPanel):
         if bgr.size == 0:
             QMessageBox.warning(self, "无法载入图片", f"图片尺寸为空: {path}")
             return False
+
+        # ⚠️ **导入边界：透明图在这里合成到白底，且只合成这一次。**
+        # 素材的透明像素里仍带着颜色（实测均值 165–179，金色拉丝），而
+        # 彩色丝印预览、原样导入、两色检测、板画灰阶这些路径都只看像素
+        # 不看 alpha，会把残影当背景显示出来。合成之后全流程按普通三通道
+        # 图走，alpha 只留给主体掩膜；下游（line_art / board_art）只对
+        # 仍然整幅带 alpha 的输入做合成，所以这里不会被重复合成。
+        had_alpha = alpha is not None and bool((alpha < 255).any())
+        if had_alpha:
+            bgr = flatten_alpha(bgr, alpha)
 
         previous = (
             self._source_bgr,
@@ -3664,7 +3685,7 @@ class PreprocessPanel(FloatingPanel):
         filename = Path(path).name
         self._source_description = (
             f"{filename}　·　{width} × {height} px"
-            + ("　·　含透明通道" if alpha is not None else "")
+            + ("　·　含透明通道（已合成白底）" if had_alpha else "")
         )
         self.source_note.setText(self._source_description)
         tone(self.source_note, "success")

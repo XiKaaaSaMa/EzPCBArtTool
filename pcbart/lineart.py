@@ -1159,15 +1159,6 @@ def _subject_mask(
     return subject_mask(image, alpha, fill=False)
 
 
-def _composite_on_white(bgr: np.ndarray, alpha: np.ndarray | None) -> np.ndarray:
-    """Flatten transparency onto white, which is what silkscreen prints on."""
-    if alpha is None:
-        return bgr
-    a = (alpha.astype(np.float32) / 255.0)[:, :, None]
-    white = np.full_like(bgr, 255.0, dtype=np.float32)
-    return (bgr.astype(np.float32) * a + white * (1.0 - a)).astype(np.uint8)
-
-
 @dataclass(frozen=True)
 class _PictureDerived:
     """Everything in the fill reading that depends on the picture alone.
@@ -1265,8 +1256,10 @@ def line_art(
     a grey pixel, so a soft response would print as dirt; the response is
     therefore thresholded rather than stretched.
 
-    ``image`` may be greyscale, BGR or BGRA; ``alpha`` can be passed separately
-    for images already split into colour and transparency.
+    ``image`` may be greyscale, BGR or BGRA. A BGRA picture is flattened onto
+    white here (its alpha is a boundary this function owns); an ``alpha``
+    passed separately promises the caller already flattened the colour --
+    see :func:`pcbart.image_prep.flatten_alpha` for why it must happen once.
 
     ``masks`` short-circuits the subject computation -- see
     :class:`SubjectMasks` and :func:`subject_masks`.
@@ -1287,16 +1280,22 @@ def line_art(
     params = (params or LineArtParams()).normalised()
 
     if image.ndim == 3 and image.shape[2] == 4:
-        alpha = image[:, :, 3]
-        image = image[:, :, :3]
+        # A picture that still carries its alpha has not been through an import
+        # boundary yet, so flatten its colour here -- the same straight-alpha
+        # composite every read site does. An explicit ``alpha`` argument means
+        # the caller already did that (measured: the panel's colour plane is
+        # flat before it gets here), and compositing again would wash the
+        # translucent rim out.
+        from .image_prep import flatten_alpha
 
+        alpha = image[:, :, 3]
+        image = flatten_alpha(image[:, :, :3], alpha)
     cached = trace_cache.matches(image, alpha) if trace_cache is not None else None
     if cached is None:
-        flat = _composite_on_white(image, alpha)
-        grey = desaturate(flat) / 255.0
+        grey = desaturate(image) / 255.0
         grey8 = np.clip(grey * 255.0, 0, 255).astype(np.uint8)
         if masks is None:
-            masks = subject_masks(flat, alpha)
+            masks = subject_masks(image, alpha)
         cached = _PictureDerived(
             grey8=grey8,
             split_level=_tone_split_level(grey8, masks.cut_out),
