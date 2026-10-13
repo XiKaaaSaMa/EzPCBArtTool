@@ -157,6 +157,7 @@ from PySide6.QtGui import (
     QPainterPath,
     QPen,
     QPixmap,
+    QShortcut,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -348,6 +349,18 @@ def muted(widget: QWidget, *, size: int = 11) -> QWidget:
     return themed(widget, lambda: f"color: {MUTED}; font-size: {size}px;")
 
 
+def note_text(label: QLabel, message: str) -> None:
+    """Set a note label's message, hiding the label while it has none.
+
+    These labels carry outcomes and errors now. The instructions that used to
+    live in them -- telling the user to tune parameters first, or what a
+    setting will do -- were removed at the user's request, so an empty message
+    must leave no gap behind.
+    """
+    label.setText(message)
+    label.setVisible(bool(message))
+
+
 #: Semantic text tones a status label can carry. Named rather than passed as a
 #: colour so the builder can look the colour up *again* after a theme change --
 #: capturing the value instead would replay the old one on every restyle.
@@ -447,6 +460,47 @@ def restyle(root: QWidget) -> int:
             continue
         count += 1
     return count
+
+
+#: Keyboard shortcuts worth teaching. Every binding here is one the window
+#: actually installs -- the 编辑 menu table, the file-level shortcuts the
+#: window sets up, or the canvas's own gestures. A row naming a key nothing
+#: listens to would be worse than no cheat sheet at all, so adding one here
+#: means adding the binding first.
+KEY_CHIPS: tuple[tuple[str, str], ...] = (
+    ("Ctrl+Tab", "切换板子"),
+    ("Ctrl+N", "新建板子"),
+    ("Ctrl+S", "保存草稿"),
+    ("Ctrl+Shift+S", "另存为草稿"),
+    ("Ctrl+O", "打开草稿"),
+    ("Ctrl+E", "另存为工程"),
+    ("Ctrl+Shift+E", "另存为下单文件"),
+    ("Ctrl+Z", "撤销"),
+    ("Ctrl+C / V / X", "复制 / 粘贴 / 剪切"),
+    ("Del", "删除"),
+    ("R", "旋转 90°"),
+    ("Ctrl+G / Ctrl+Shift+G", "组合 / 取消组合"),
+)
+
+#: The canvas gestures, listed under the keys in the same cheat sheet.
+MOUSE_CHIPS: tuple[tuple[str, str], ...] = (
+    ("滚轮缩放", "中键/空格拖动平移"),
+    ("双击画布", "整板回到视野"),
+    ("Ctrl+单击 / Shift+单击", "加选 / 选一段"),
+)
+
+
+def shortcut_lines() -> list[str]:
+    """The cheat sheet as plain lines, for 【帮助 → 快捷键】.
+
+    Assembled from the same tuples the bindings are checked against, so the
+    menu page and the keys the window really installs cannot drift apart.
+    """
+    lines = ["快捷键", ""]
+    lines += [f"{key}　{action}" for key, action in KEY_CHIPS]
+    lines += ["", "鼠标手势", ""]
+    lines += [f"{key}　{action}" for key, action in MOUSE_CHIPS]
+    return lines
 
 
 def section(title: str, compact: bool = False) -> QGroupBox:
@@ -796,7 +850,7 @@ STYLE_OPTIONS: tuple[tuple[str, str], ...] = (
         BOARD_ART_STYLE,
         "轮廓白线 + 亮部白块、暗部与背景黑块；白色走丝印、黑色走铜",
     ),
-    (COLOR_STYLE, "保留原图配色：只有丝印工艺能表达颜色，因此层被锁定"),
+    (COLOR_STYLE, "保留原图配色：只有丝印能表达颜色，层已锁定"),
 )
 
 
@@ -842,17 +896,17 @@ READING_OPTIONS: tuple[tuple[str, str, str], ...] = (
     (
         READING_FILL,
         "填充色块（默认）",
-        "用一个明暗分界把图分成黑白两块：适合纯色线稿，细节少但干净",
+        "按一个明暗分界分成黑白两块：适合纯色线稿，细节少但干净",
     ),
     (
         READING_OUTLINE,
         "描边 + 填充",
-        "先找轮廓再补上暗部色块：适合有明暗过渡的立绘，眉毛、链条、布料纹理能保留",
+        "先找轮廓，再补暗部色块：适合有明暗过渡的立绘，眉毛、链条、布料纹理能保留",
     ),
     (
         READING_DODGE,
         "纯线条",
-        "只描「比周围暗」的边，深色立绘不会被涂成黑块；浅色平涂图容易把纹理描成碎网，可勾选降噪",
+        "只描「比周围暗」的边，深色立绘不涂黑块；浅色平涂图易出碎网，可先降噪",
     ),
 )
 
@@ -1353,14 +1407,14 @@ class ResizeGrip(QWidget):
     }
 
     LABELS = {
-        "n": "上边缘：上下拖动调整高度",
-        "s": "下边缘：上下拖动调整高度",
-        "e": "右边缘：左右拖动调整宽度",
-        "w": "左边缘：左右拖动调整宽度",
-        "ne": "右上角：拖动调整大小",
-        "nw": "左上角：拖动调整大小",
-        "se": "右下角：拖动调整大小",
-        "sw": "左下角：拖动调整大小",
+        "n": "拖动调整高度",
+        "s": "拖动调整高度",
+        "e": "拖动调整宽度",
+        "w": "拖动调整宽度",
+        "ne": "拖动调整大小",
+        "nw": "拖动调整大小",
+        "se": "拖动调整大小",
+        "sw": "拖动调整大小",
     }
 
     def __init__(self, panel: "FloatingPanel", zone: str) -> None:
@@ -1483,11 +1537,11 @@ class ResizeGrip(QWidget):
 
 
 def chrome_height(window: QWidget) -> int:
-    """Height of everything above the working area: menu, toolbar, banner, tabs.
+    """Height of everything above the working area: menu, toolbar, tabs.
 
-    Measured from the widgets rather than assumed, because the banner wraps to
-    two lines when the window is narrow and a hard-coded offset would put the
-    floating panels back on top of the tab row exactly then.
+    Measured from the widgets rather than assumed: the tab row and the toolbar
+    change height with the platform's font metrics, and a hard-coded offset
+    would put the floating panels back on top of the tab row exactly then.
 
     ⚠️ **A widget that has never been laid out reports a meaningless height.**
     Before the window is shown, ``QToolBar.height()`` and friends answer with
@@ -1512,10 +1566,6 @@ def chrome_height(window: QWidget) -> int:
     row = window.findChild(QWidget, "ProjectTabRow")
     if row is not None:
         total += laid_out(row)
-
-    banner = getattr(window, "_banner", None)
-    if banner is not None:
-        total += laid_out(banner)
 
     return total
 
@@ -2342,7 +2392,7 @@ class PreviewPanel(FloatingPanel):
         self.actual_button.setFixedHeight(24)
         self.full_button = QPushButton("全分辨率")
         self.full_button.setFixedHeight(24)
-        self.full_button.setToolTip("按原始尺寸重新计算；拖动滑块时显示的是快速预览")
+        self.full_button.setToolTip("按原始尺寸重算；拖动滑块时为快速预览")
         bar_layout.addWidget(self.fit_button)
         bar_layout.addWidget(self.actual_button)
         bar_layout.addWidget(self.full_button)
@@ -2355,13 +2405,6 @@ class PreviewPanel(FloatingPanel):
 
         self.view = ImageView()
         layout.addWidget(self.view, 1)
-
-        self.hint = QLabel(
-            "滚轮缩放，拖动平移，双击适应窗口。滑轮与列表均不响应滚轮，避免误改数值。"
-        )
-        self.hint.setWordWrap(True)
-        muted(self.hint)
-        layout.addWidget(self.hint)
 
         self.fit_button.clicked.connect(self.view.fit)
         self.actual_button.clicked.connect(self.view.actual_size)
@@ -2506,15 +2549,6 @@ class PreprocessPanel(FloatingPanel):
 
         layout = self.content_layout
 
-        banner = QLabel(
-            "上传、线稿与降噪已可用（仅本地文件）。"
-            "画布按「呈现方式」选定的图层显示处理后的线稿，颜色即该层颜色；"
-            "选「彩色丝印」则保留原图配色。"
-        )
-        banner.setWordWrap(True)
-        warn_surface(banner)
-        layout.addWidget(banner)
-
         upload = section("1 · 上传图片", compact=True)
         upload_layout = QVBoxLayout(upload)
         upload_layout.setContentsMargins(0, 0, 0, 0)
@@ -2539,14 +2573,14 @@ class PreprocessPanel(FloatingPanel):
         self.process_check = QCheckBox("处理图像（按下面的风格与参数）")
         self.process_check.setChecked(True)
         self.process_check.setToolTip(
-            "勾选：先按风格与参数处理，再放到画板上。\n"
-            "取消：图片原样放上去，不做任何处理。"
+            "勾选：先按下面的风格与参数处理，再放到画板上；取消：原样放置。"
         )
         self.process_check.stateChanged.connect(self._on_process_toggled)
         process_layout.addWidget(self.process_check)
         self.process_note = QLabel()
         self.process_note.setWordWrap(True)
         muted(self.process_note)
+        self.process_note.setVisible(False)
         process_layout.addWidget(self.process_note)
         layout.addWidget(process_group)
         self.process_group = process_group
@@ -2557,11 +2591,6 @@ class PreprocessPanel(FloatingPanel):
         style_layout.setSpacing(2)
         self.style_combo = combo([name for name, _ in STYLE_OPTIONS])
         style_layout.addWidget(row("风格", self.style_combo))
-        self.style_note = QLabel()
-        self.style_note.setWordWrap(True)
-        muted(self.style_note)
-        self.style_note.setContentsMargins(104, 0, 0, 0)
-        style_layout.addWidget(self.style_note)
         layout.addWidget(style_group)
         self.style_group = style_group
 
@@ -2588,20 +2617,7 @@ class PreprocessPanel(FloatingPanel):
         self.layer_combo = combo([])
         self.presentation_row = row("呈现", self.layer_combo)
         layer_layout.addWidget(self.presentation_row)
-        self.layer_note = QLabel()
-        self.layer_note.setWordWrap(True)
-        muted(self.layer_note)
-        self.layer_note.setContentsMargins(104, 0, 0, 0)
-        layer_layout.addWidget(self.layer_note)
         self.layer_group = layer_group
-
-        self.rule_note = QLabel()
-        self.rule_note.setWordWrap(True)
-        self.rule_note.setVisible(False)
-        self.rule_note.setMinimumHeight(34)
-        self.rule_note.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        warn_surface(self.rule_note, size=11)
-        layer_layout.addWidget(self.rule_note)
         layout.addWidget(layer_group)
 
         # The tuning panel: every control here drives a live preview, so the
@@ -2620,11 +2636,6 @@ class PreprocessPanel(FloatingPanel):
         self.reading_combo = combo([label for _key, label, _hint in READING_OPTIONS])
         self.reading_combo.currentIndexChanged.connect(self._on_reading_changed)
         tune_layout.addWidget(row("读法", self.reading_combo))
-        self.reading_note = QLabel()
-        self.reading_note.setWordWrap(True)
-        muted(self.reading_note)
-        self.reading_note.setContentsMargins(104, 0, 0, 0)
-        tune_layout.addWidget(self.reading_note)
 
         self.strength_slider = NoWheelSlider(Qt.Horizontal)
         self.strength_slider.setRange(20, 400)
@@ -2656,7 +2667,7 @@ class PreprocessPanel(FloatingPanel):
         self.outline_width_row = row(
             "描边线宽",
             self.outline_width_slider,
-            "描边在成品上的宽度（0.10–1.00 mm）；低于 0.10 mm 嘉立创做不出来",
+            "描边在成品上的宽度（0.10–1.00 mm）；低于 0.10 mm 嘉立创无法生产",
         )
         tune_layout.addWidget(self.outline_width_row)
 
@@ -2667,7 +2678,7 @@ class PreprocessPanel(FloatingPanel):
         self.outline_detail_row = row(
             "细节尺度",
             self.outline_detail_slider,
-            "越小越能看清细线，也越容易把纹理当成线；越大越干净",
+            "越小细线越清楚，也越容易把纹理当线；越大越干净",
         )
         tune_layout.addWidget(self.outline_detail_row)
 
@@ -2682,9 +2693,10 @@ class PreprocessPanel(FloatingPanel):
         )
         tune_layout.addWidget(self.outline_density_row)
 
-        self.tune_note = QLabel("载入图片后可实时调节")
+        self.tune_note = QLabel()
         self.tune_note.setWordWrap(True)
         muted(self.tune_note)
+        self.tune_note.setVisible(False)
         tune_layout.addWidget(self.tune_note)
 
         preview_row = QWidget()
@@ -2712,7 +2724,7 @@ class PreprocessPanel(FloatingPanel):
 
         self.denoise_check = QCheckBox("启用降噪（独立步骤，先于线稿提取）")
         self.denoise_check.setToolTip(
-            "对干净矢量图无益，会软化细节；扫描件与照片建议开启"
+            "干净矢量图用不到，且会软化细节；扫描件与照片建议开启"
         )
         self.denoise_check.stateChanged.connect(self._on_tuning_changed)
         denoise_layout.addWidget(self.denoise_check)
@@ -2730,7 +2742,7 @@ class PreprocessPanel(FloatingPanel):
         self.despeckle_slider.setValue(0)
         self.despeckle_slider.valueChanged.connect(self._on_tuning_changed)
         denoise_layout.addWidget(
-            row("去杂点", self.despeckle_slider, "清除小于该像素数的孤立墨点；0 为关闭")
+            row("去杂点", self.despeckle_slider, "清除小于该像素数的孤立墨点（0=关）")
         )
 
         silhouette_row = QWidget()
@@ -2750,8 +2762,7 @@ class PreprocessPanel(FloatingPanel):
         self.silhouette_check.setChecked(False)
         self.silhouette_check.setToolTip(
             "线稿算法看不到主体的外边界（浅色主体对浅色背景时尤其明显），"
-            "勾选后补上主体的外边界。只影响线稿图案本身；"
-            "异形板框始终自己取主体轮廓，不受这个开关影响。"
+            "勾选后补上主体外边界。只影响线稿图案；异形板框走自己的主体掩膜。"
         )
         self.silhouette_check.stateChanged.connect(self._on_tuning_changed)
         silhouette_layout.addWidget(self.silhouette_check)
@@ -2769,21 +2780,12 @@ class PreprocessPanel(FloatingPanel):
         # milliseconds. See `clean_strokes_with_arcs` for the trade.
         self.arc_smooth_check = QCheckBox("弧线平滑（清毛刺）")
         self.arc_smooth_check.setToolTip(
-            "把线稿的锯齿边缘重新描成平滑曲线。\n"
-            "实测可把碎块减少 23–43%，细节总量基本不变；\n"
-            "代价是这一步本身要跑几秒，所以只在需要时打开。"
+            "线稿的锯齿边缘重描成平滑曲线；\n"
+            "实测碎块减少 23–43%，细节总量基本不变；\n"
+            "这一步要跑几秒，只在需要时打开。"
         )
         self.arc_smooth_check.stateChanged.connect(self._on_tuning_changed)
         denoise_layout.addWidget(self.arc_smooth_check)
-
-        self.denoise_note = QLabel(
-            "独立步骤：先降噪，再提取线稿。关闭降噪时线条提取完全不受影响。"
-            "轮廓补线优先取透明通道；没有透明通道时按图片边缘的颜色推断主体，"
-            "因此任何图片都适用。"
-        )
-        self.denoise_note.setWordWrap(True)
-        muted(self.denoise_note)
-        denoise_layout.addWidget(self.denoise_note)
 
         layout.addWidget(denoise)
 
@@ -2803,11 +2805,6 @@ class PreprocessPanel(FloatingPanel):
         self.open_preview_button.setMinimumHeight(28)
         self.open_preview_button.clicked.connect(self.open_preview_window)
         preview_layout_group.addWidget(self.open_preview_button)
-
-        self.preview_note = QLabel("按当前风格全分辨率重算，可缩放对比细节")
-        self.preview_note.setWordWrap(True)
-        muted(self.preview_note)
-        preview_layout_group.addWidget(self.preview_note)
         layout.addWidget(preview_group)
 
         self.redraw_section = self._build_redraw_section()
@@ -2837,15 +2834,15 @@ class PreprocessPanel(FloatingPanel):
         )
         self.import_button.clicked.connect(self.import_to_canvas)
 
-        self.import_note = QLabel("载入图片后，先把参数调好，再点此导入画布")
+        self.import_note = QLabel()
         self.import_note.setWordWrap(True)
         muted(self.import_note)
+        self.import_note.setVisible(False)
         self.set_footer(self._build_import_footer())
 
-        # Changing 风格 or 呈现方式 moves the imported picture to the layers
-        # that choice names, so both go through the same handler.
+        # Changing 风格 moves the imported picture to the layers that choice
+        # names, and decides which of the controls below are live.
         self.style_combo.currentIndexChanged.connect(self._on_style_changed)
-        self.layer_combo.currentIndexChanged.connect(self._on_presentation_changed)
         self._refresh_layers()
 
     def _build_redraw_section(self) -> QGroupBox:
@@ -2863,14 +2860,6 @@ class PreprocessPanel(FloatingPanel):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
 
-        note = QLabel(
-            "让模型照着原图重新画一遍线稿：细眉毛、链条、衣褶不会糊成色块，"
-            "适合线条密集的插画。模型不随软件分发，需要自己指定文件夹。"
-        )
-        note.setWordWrap(True)
-        muted(note)
-        layout.addWidget(note)
-
         self.redraw_status = QLabel()
         self.redraw_status.setWordWrap(True)
         layout.addWidget(self.redraw_status)
@@ -2878,7 +2867,7 @@ class PreprocessPanel(FloatingPanel):
         self.redraw_button = QPushButton("外接模型设置与说明…")
         self.redraw_button.setMinimumHeight(28)
         self.redraw_button.setToolTip(
-            "重绘要用外接的 Anime2Sketch 模型，这里可以看状态、指定模型文件夹"
+            "重绘用外接 Anime2Sketch 模型；这里查看状态、指定模型文件夹"
         )
         self.redraw_button.clicked.connect(self._on_external_redraw)
         layout.addWidget(self.redraw_button)
@@ -2935,12 +2924,11 @@ class PreprocessPanel(FloatingPanel):
         looks like it runs the feature and does not.
         """
         lines = [
-            "线稿重绘用 Anime2Sketch（MIT）模型把原图**重新画一遍**，不是在图上"
-            "找边。细眉毛、链条、衣褶这些会被现有的填充读法糊成色块的地方，"
-            "它能画成一条线。",
+            "线稿重绘用 Anime2Sketch（MIT）模型**重新画线稿**，不是在图上找边。"
+            "填充读法糊成色块的细眉毛、链条、衣褶，模型能描成线条。",
             "",
-            "模型不随软件分发：权重约 190 MB，而整个安装包才 178 MB；"
-            "纯 CPU 跑一次还要约 4.6 GB 内存，所以由你自己决定要不要装。",
+            "模型不随软件分发：权重约 190 MB（安装包约 178 MB）；"
+            "纯 CPU 跑一次约需 4.6 GB 内存，是否安装由你决定。",
             "",
             self._redraw_status()[1],
         ]
@@ -2948,7 +2936,7 @@ class PreprocessPanel(FloatingPanel):
             lines += [
                 "",
                 "获取：python tools\\fetch_anime2sketch.py",
-                "也可以在下面的【选择模型文件夹…】里指向已经下载好的那一份。",
+                "也可在下面【选择模型文件夹…】里指向已下载好的那份。",
             ]
         else:
             lines += [
@@ -3068,13 +3056,6 @@ class PreprocessPanel(FloatingPanel):
         options_layout.addWidget(self.invert_check)
         options_layout.addStretch(1)
         layout.addWidget(options)
-
-        self.board_art_note = QLabel(
-            "白线 + 亮部走丝印，暗部 + 背景走铜。分界调低则白色更多。"
-        )
-        self.board_art_note.setWordWrap(True)
-        muted(self.board_art_note)
-        layout.addWidget(self.board_art_note)
 
         box.setVisible(False)
         return box
@@ -3495,24 +3476,22 @@ class PreprocessPanel(FloatingPanel):
         self._soft_shaded_source = soft
 
         if detected:
-            self.process_note.setText(
-                "检测到这张图只有两种颜色，已取消「处理图像」："
-                "图片会原样放到画板上。需要线稿或板画效果时，勾选上方开关即可。"
+            note_text(
+                self.process_note,
+                "检测到只有两种颜色，已取消「处理图像」：图片原样放到画板上；"
+                "需要线稿或板画时勾选上方开关。",
             )
             tone(self.process_note, "success")
         elif soft:
-            self.process_note.setText(
-                "检测到这张图有柔和明暗渐变：渐变会让线稿切出很多碎圈，"
-                f"可以勾选「降噪」（已按这张图的大小预设为 "
-                f"{self.denoise_slider.value()}px）。默认不勾选，"
-                "保留原图细节。"
+            note_text(
+                self.process_note,
+                "检测到柔和明暗渐变：可勾选「降噪」"
+                f"（已按图大小预设为 {self.denoise_slider.value()}px），"
+                "默认不勾选。",
             )
             tone(self.process_note, "success")
         else:
-            self.process_note.setText(
-                "图片会被处理后再放到画板上；取消勾选则原样放置。"
-            )
-            muted(self.process_note)
+            note_text(self.process_note, "")
         self._refresh_layers()
 
     def _on_style_changed(self) -> None:
@@ -3557,10 +3536,6 @@ class PreprocessPanel(FloatingPanel):
         positioned. Only 导入图片 rearranges.
         """
         self._refresh_layers()
-
-    def _on_presentation_changed(self) -> None:
-        """The 呈现方式 combo moved: describe the choice for the next import."""
-        self._refresh_layer_note()
 
     def _refresh_board_note(self) -> None:
         """Show the source description plus the current board size.
@@ -3694,11 +3669,8 @@ class PreprocessPanel(FloatingPanel):
         self.source_note.setText(self._source_description)
         tone(self.source_note, "success")
         self.import_button.setEnabled(True)
-        self.import_button.setToolTip("把当前的线稿按所选图层导入画布")
-        self.import_note.setText(
-            "参数调好后点上方按钮导入；未导入前画布不会变化。"
-        )
-        muted(self.import_note)
+        self.import_button.setToolTip("按所选图层导入当前线稿")
+        note_text(self.import_note, "")
         self._refresh_board_note()
         return True
 
@@ -3780,9 +3752,7 @@ class PreprocessPanel(FloatingPanel):
             canvas.frame_into_card_region(canvas.selected)
             canvas.record_external_change()
             canvas.fit_view()
-            self.import_note.setText(
-                "已原样导入画布（未处理）；改参数前请先勾选「处理图像」。"
-            )
+            note_text(self.import_note, "已原样导入画布（未处理）。")
             tone(self.import_note, "success")
             return True
 
@@ -3823,11 +3793,12 @@ class PreprocessPanel(FloatingPanel):
         canvas.record_external_change()
         canvas.fit_view()
         if framed:
-            self.import_note.setText(
-                "已导入画布并放入立绘区；取景后再次点击会替换画布上的图。"
+            note_text(
+                self.import_note,
+                "已导入画布并放入立绘区；再次点击替换画布上的图。",
             )
         else:
-            self.import_note.setText("已导入画布；改参数后再次点击会替换画布上的图。")
+            note_text(self.import_note, "已导入画布；改参数后再次点击替换画布上的图。")
         tone(self.import_note, "success")
         return True
 
@@ -3880,9 +3851,6 @@ class PreprocessPanel(FloatingPanel):
             widget.setVisible(reading == READING_OUTLINE)
         for widget in (self.strength_row, self.threshold_row):
             widget.setVisible(reading == READING_DODGE)
-        index = self.reading_combo.currentIndex()
-        if 0 <= index < len(READING_OPTIONS):
-            self.reading_note.setText(READING_OPTIONS[index][2])
 
     def _lineart_params(self, param_scale: float = 1.0):
         """Line-extraction settings only.
@@ -4152,7 +4120,7 @@ class PreprocessPanel(FloatingPanel):
                         else preview_bgr
                     )
             except Exception as exc:  # noqa: BLE001 - surfaced to the user
-                self.tune_note.setText(f"图片读取失败：{exc}")
+                note_text(self.tune_note, f"图片读取失败：{exc}")
                 tone(self.tune_note, "danger")
                 return
             self._inline_processed = processed
@@ -4174,7 +4142,7 @@ class PreprocessPanel(FloatingPanel):
             import traceback
 
             traceback.print_exc()
-            self.tune_note.setText(f"处理失败：{exc}")
+            note_text(self.tune_note, f"处理失败：{exc}")
             tone(self.tune_note, "danger")
             return
         elapsed_ms = (time.perf_counter() - start) * 1000.0
@@ -4204,6 +4172,7 @@ class PreprocessPanel(FloatingPanel):
                 f"{'翻转 ' + '/'.join(flips) if flips else '不翻转'}　·　"
                 f"{elapsed_ms:.0f} ms"
             )
+            self.tune_note.setVisible(True)
         else:
             denoise_state = (
                 f"降噪 {self.denoise_slider.value()}px"
@@ -4237,6 +4206,7 @@ class PreprocessPanel(FloatingPanel):
                 f"{denoise_state}　·　"
                 f"墨量 {ink:.1f}%　·　{elapsed_ms:.0f} ms"
             )
+            self.tune_note.setVisible(True)
         tone(self.tune_note, "success")
 
         # Show the bounded result on the canvas too, so the layer preview
@@ -4291,7 +4261,7 @@ class PreprocessPanel(FloatingPanel):
                 working_bgr, working_alpha, param_scale=work_scale
             )
         except Exception as exc:  # noqa: BLE001 - surfaced, not hidden
-            self.tune_note.setText(f"线稿写入失败：{exc}")
+            note_text(self.tune_note, f"线稿写入失败：{exc}")
             tone(self.tune_note, "danger")
             return
 
@@ -4322,7 +4292,7 @@ class PreprocessPanel(FloatingPanel):
                     pixmap,
                     Path(self._source_path or "").name,
                     f"{self._source_bgr.shape[1]} × {self._source_bgr.shape[0]} px"
-                    "　·　显示原图（取消勾选「显示处理结果」前）",
+                    "　·　显示原图（「显示处理结果」已关闭）",
                 )
             return
 
@@ -4455,7 +4425,7 @@ class PreprocessPanel(FloatingPanel):
                 # so the white paper is not printed onto the card.
                 imwrite_unicode(target, processed)
             except Exception as exc:  # noqa: BLE001 - surfaced, not hidden
-                self.tune_note.setText(f"线稿写入失败：{exc}")
+                note_text(self.tune_note, f"线稿写入失败：{exc}")
                 tone(self.tune_note, "danger")
                 return False
             self._published_digest = digest
@@ -4506,7 +4476,7 @@ class PreprocessPanel(FloatingPanel):
                 try:
                     imwrite_unicode(target, image)
                 except Exception as exc:  # noqa: BLE001 - surfaced, not hidden
-                    self.tune_note.setText(f"板画写入失败：{exc}")
+                    note_text(self.tune_note, f"板画写入失败：{exc}")
                     tone(self.tune_note, "danger")
                     return False
                 self._published_digests[target] = digest
@@ -4630,7 +4600,6 @@ class PreprocessPanel(FloatingPanel):
     def _refresh_layers(self) -> None:
         style_index = self.style_combo.currentIndex()
         style = STYLE_OPTIONS[style_index][0]
-        self.style_note.setText(STYLE_OPTIONS[style_index][1])
 
         side = self._side()
         locked = style == COLOR_STYLE
@@ -4652,7 +4621,7 @@ class PreprocessPanel(FloatingPanel):
                 self.redraw_section,
             ):
                 widget.setVisible(False)
-            self.process_note.setText("图片将原样放到画板上，不做任何处理。")
+            note_text(self.process_note, "图片原样放到画板上，不做处理。")
             return
 
         self.style_group.setVisible(True)
@@ -4703,28 +4672,13 @@ class PreprocessPanel(FloatingPanel):
             # but the index is not set, because Qt rejects index 0 on an empty
             # combo. Nothing reads it in this mode either way.
             options = []
-            index = self.board_art_side_combo.currentIndex()
-            if not 0 <= index < len(BOARD_ART_SIDE_OPTIONS):
-                index = 0
             self.layer_combo.setEnabled(False)
-            self.rule_note.setText(
-                f"已选择「{BOARD_ART_STYLE}」：白色轮廓与亮部走丝印、"
-                f"黑色块面走铜。板面改为「{BOARD_ART_SIDE_OPTIONS[index][1]}」"
-                "这类选择，不再逐层勾选。"
-            )
-            self.rule_note.setVisible(True)
         elif locked:
             options = [(f"{side}丝印层", ("",), "彩色丝印：颜色只能印在丝印层")]
             self.layer_combo.setEnabled(False)
-            self.rule_note.setText(
-                f"已选择「{COLOR_STYLE}」：呈现方式锁定为「{side}丝印层」，"
-                "且保留原图颜色，不做线稿处理。"
-            )
-            self.rule_note.setVisible(True)
         else:
             options = layer_options(side)
             self.layer_combo.setEnabled(True)
-            self.rule_note.setVisible(False)
 
         for name, _keys, _hint in options:
             self.layer_combo.addItem(name)
@@ -4740,32 +4694,6 @@ class PreprocessPanel(FloatingPanel):
                 self.layer_combo.setCurrentIndex(0)
 
         self.layer_combo.blockSignals(False)
-        self._refresh_layer_note()
-
-    def _refresh_layer_note(self) -> None:
-        side = self._side()
-        if self._style() == BOARD_ART_STYLE:
-            index = self.board_art_side_combo.currentIndex()
-            if not 0 <= index < len(BOARD_ART_SIDE_OPTIONS):
-                index = 0
-            self.layer_note.setText(BOARD_ART_SIDE_OPTIONS[index][2])
-            return
-        if self._style() == COLOR_STYLE:
-            self.layer_note.setText("保留原图配色，画布显示彩色原图；不做线稿处理")
-            return
-        options = {label: hint for label, _keys, hint in layer_options(side)}
-        hint = options.get(self.layer_combo.currentText(), "")
-        # Line art can leave the tool as a picture, but only on a silkscreen
-        # layer: the EDA's embedded-object API accepts no other layer, and a
-        # request for copper is silently answered with silkscreen. Rather than
-        # let that surprise someone, say which of the choices keeps the pixels.
-        if self._style() == "线稿":
-            keys = self._presentation_keys()
-            if keys and all(key.endswith("_silk") for key in keys):
-                hint += "；线稿会作为黑白图片放入，细节按原图保留"
-            elif keys and not any(key.endswith("_silk") for key in keys):
-                hint += "；铜层只能放填充图形，想要图片请选丝印层"
-        self.layer_note.setText(hint)
 
 
 def live_panel(name: str):
@@ -4903,14 +4831,6 @@ class BoardSetupPanel(FloatingPanel):
         layout = self.content_layout
         layout.setSpacing(4)
 
-        intro = QLabel(
-            "先选板框形状，再按该形状设置尺寸。改动实时生效，背后画布即为预览，"
-            "图片也可在画布上直接拖动。"
-        )
-        intro.setWordWrap(True)
-        muted(intro)
-        layout.addWidget(intro)
-
         shape_group = section("1 · 板框形状", compact=True)
         shape_layout = QVBoxLayout(shape_group)
         shape_layout.setContentsMargins(0, 0, 0, 0)
@@ -4948,7 +4868,7 @@ class BoardSetupPanel(FloatingPanel):
             item = self.shape_combo.model().item(self.shape_combo.count() - 1)
             if item is not None:
                 item.setEnabled(False)
-            self.template_combo.setToolTip("模板文件尚未提供，载入后此选项即可用")
+            self.template_combo.setToolTip("未提供模板文件")
         self.template_combo.currentIndexChanged.connect(self._on_template_changed)
         self.template_row = row("模板", self.template_combo)
         shape_layout.addWidget(self.template_row)
@@ -5243,7 +5163,7 @@ class BoardSetupPanel(FloatingPanel):
         if image is None:
             self.image_note.setText("尚未导入图片")
         elif self._is_trace_base():
-            self.image_note.setText("尺寸由上方板框尺寸决定")
+            self.image_note.setText("")
         elif combining:
             travel = self._image_travel_mm(image)
             self.image_x_slider.setEnabled(travel > 0.05)
@@ -5252,7 +5172,7 @@ class BoardSetupPanel(FloatingPanel):
             else:
                 self.image_note.setText("图片已占满底座宽度，无法左右移动")
         else:
-            self.image_note.setText("画布上可直接拖动图片位置")
+            self.image_note.setText("")
 
     def _image_travel_mm(self, image) -> float:
         """How far the artwork can slide sideways inside the base.
@@ -5525,7 +5445,7 @@ class BoardSetupPanel(FloatingPanel):
             # telling the user to shrink the very dimension the base needs.
             self.standee_note.setText(
                 f"插舌比下边缘宽（下边缘可用 {contact:.1f} mm），"
-                "两侧伸到板外，位置固定在中点"
+                "两端伸到板外；位置固定在中点"
             )
             return
         self.standee_note.setText("下边缘没有可移动的余量，插舌固定在中点")
@@ -5763,15 +5683,6 @@ class ThemeSettingsPanel(FloatingPanel):
 
         layout = self.content_layout
 
-        intro = QLabel(
-            "界面配色由**一个颜色**推出来：选一个主色，面板、文字、按钮"
-            "会自动配好。想逐个调就在下面展开【高级】。"
-        )
-        intro.setWordWrap(True)
-        muted(intro)
-        intro.setTextFormat(Qt.MarkdownText)
-        layout.addWidget(intro)
-
         # ------------------------------------------------------- presets
         preset_group = section("1 · 主题色", compact=True)
         preset_layout = QVBoxLayout(preset_group)
@@ -5816,10 +5727,6 @@ class ThemeSettingsPanel(FloatingPanel):
         self.mode_combo = combo(["浅色", "深色"])
         self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         mode_layout.addWidget(row("外观", self.mode_combo))
-        self.mode_note = QLabel()
-        self.mode_note.setWordWrap(True)
-        muted(self.mode_note)
-        mode_layout.addWidget(self.mode_note)
         layout.addWidget(mode_group)
 
         # ----------------------------------------------------- advanced
@@ -5833,14 +5740,6 @@ class ThemeSettingsPanel(FloatingPanel):
         advanced_layout = QVBoxLayout(self.advanced_group)
         advanced_layout.setContentsMargins(0, 0, 0, 0)
         advanced_layout.setSpacing(4)
-
-        advanced_note = QLabel(
-            "下面每个颜色都可以单独改。改过的颜色不会再跟着主色走，"
-            "【重置为预设】可以放回自动配色。"
-        )
-        advanced_note.setWordWrap(True)
-        muted(advanced_note)
-        advanced_layout.addWidget(advanced_note)
 
         from pcbart.ui_theme import ROLE_LABELS
 
@@ -5887,15 +5786,6 @@ class ThemeSettingsPanel(FloatingPanel):
         layout = QVBoxLayout(group)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
-
-        note = QLabel(
-            "线稿重绘要用 Anime2Sketch 模型，安装包里不带它（权重 183 MB，"
-            "CPU 跑一次要 4.6 GB 内存）。在这里指定模型文件夹；不设置时"
-            "重绘功能提示未安装，其余功能不受影响。"
-        )
-        note.setWordWrap(True)
-        muted(note)
-        layout.addWidget(note)
 
         # The path is shown in a read-only field rather than a label so a long
         # path can be selected and copied -- on the machine that has the model
@@ -5950,14 +5840,6 @@ class ThemeSettingsPanel(FloatingPanel):
         self.update_check_box.setChecked(self._auto_check_enabled())
         self.update_check_box.toggled.connect(self._set_auto_check)
         layout.addWidget(self.update_check_box)
-
-        note = QLabel(
-            "只读取官网上的一个版本清单，不发送任何本机信息。"
-            "关闭后仍可用下面的按钮手动检查。"
-        )
-        note.setWordWrap(True)
-        muted(note)
-        layout.addWidget(note)
 
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
@@ -6059,13 +5941,13 @@ class ThemeSettingsPanel(FloatingPanel):
                 if others
                 else ""
             )
-            self.model_status.setText(
-                f"⚠️ 还不能用：缺少 {'；'.join(report['missing'])}。{extra}"
-                "按下面的命令获取，或【选择文件夹…】指向已下载好的那份。"
+            note_text(
+                self.model_status,
+                f"⚠️ 还不能用：缺少 {'；'.join(report['missing'])}。{extra}",
             )
             tone(self.model_status, "warning")
 
-        self.model_hint.setText(self._model_hint())
+        note_text(self.model_hint, self._model_hint())
 
     def _saved_model_setting(self) -> str:
         from pcbart.ui_theme import load_settings
@@ -6074,34 +5956,21 @@ class ThemeSettingsPanel(FloatingPanel):
         return value if isinstance(value, str) else ""
 
     def _model_hint(self) -> str:
-        """Where the folder may come from, and how to fetch one.
+        """The one fact worth keeping: an environment override outranks this panel.
 
         ⚠️ The folder picked here is the *third* source consulted, so someone
         who set the environment variable and then wonders why picking a folder
-        changes nothing needs to read that here rather than discover it.
+        changes nothing needs to read that here rather than discover it. The
+        "where to get a model" prose that used to live here was removed at the
+        user's request; the 线稿重绘 dialog in the preprocessing panel carries
+        that guidance instead.
         """
-        from pcbart.model_paths import (
-            ARCHITECTURE_FILE,
-            MODEL_ENV,
-            WEIGHT_FILES,
-            default_model_dir,
-        )
+        from pcbart.model_paths import MODEL_ENV
 
-        needed = "、".join(
-            [ARCHITECTURE_FILE, *[str(relative) for relative in WEIGHT_FILES.values()]]
-        )
-        lines = [
-            f"需要的文件：{needed}",
-            f"默认位置：{default_model_dir()}",
-            "获取：python tools\\fetch_anime2sketch.py",
-        ]
         override = os.environ.get(MODEL_ENV)
-        if override:
-            lines.insert(
-                0,
-                f"⚠️ 环境变量 {MODEL_ENV} 已设置，优先于这里的选择：{override}",
-            )
-        return "\n".join(lines)
+        if not override:
+            return ""
+        return f"⚠️ 环境变量 {MODEL_ENV} 已设置，优先于这里的选择：{override}"
 
     # ------------------------------------------------------------- actions
 
@@ -6195,9 +6064,7 @@ class ThemeSettingsPanel(FloatingPanel):
             self.mode_combo.setCurrentIndex(1 if self._scheme.dark else 0)
 
             if self._scheme.custom:
-                self.preset_note.setText(
-                    "当前是自定义配色（已手动改过颜色）。点任一预设会丢弃这些改动。"
-                )
+                self.preset_note.setText("当前是自定义配色（已手动改过颜色）。")
             else:
                 name = next(
                     (
@@ -6214,9 +6081,6 @@ class ThemeSettingsPanel(FloatingPanel):
                     else f"当前：自定义主色　{self._scheme.seed}"
                 )
 
-            self.mode_note.setText(
-                "深色界面适合暗环境长时间使用；画布始终是黑底，不受这里影响。"
-            )
             for role, button in self._role_buttons.items():
                 colour = self._scheme[role]
                 button.setText(colour.upper())
@@ -6815,7 +6679,7 @@ class TemplateContentPanel(FloatingPanel):
         clear.clicked.connect(self._on_clear_operator)
         inner.addWidget(clear)
 
-        self.insert_art_button = QPushButton("把干员二维码与条形码放入卡面")
+        self.insert_art_button = QPushButton("放入干员二维码与条形码")
         self.insert_art_button.setMinimumHeight(28)
         self.insert_art_button.setToolTip(
             "按当前干员生成透明底的二维码（45°）和情报编号条形码（90°），"
@@ -7034,13 +6898,6 @@ class TemplateContentPanel(FloatingPanel):
         inner.setContentsMargins(0, 0, 0, 0)
         inner.setSpacing(4)
 
-        intro = QLabel(
-            "每项都可以改成别的、也可以不放。改完立刻重放到卡面。"
-        )
-        intro.setWordWrap(True)
-        muted(intro)
-        inner.addWidget(intro)
-
         self.art_search = QLineEdit()
         self.art_search.setPlaceholderText("搜索素材（职业 / 阵营 / 干员名）…")
         self.art_search.setClearButtonEnabled(True)
@@ -7240,14 +7097,6 @@ class TemplateContentPanel(FloatingPanel):
         inner.setContentsMargins(0, 0, 0, 0)
         inner.setSpacing(4)
 
-        intro = QLabel(
-            "每张卡上的字都能改。行内可以写 {代号} 和 {编号}，"
-            "选好干员后会自动替换成该干员的值。"
-        )
-        intro.setWordWrap(True)
-        muted(intro)
-        inner.addWidget(intro)
-
         self.text_list = QListWidget()
         self.text_list.setFixedHeight(170)
         self.text_list.currentRowChanged.connect(self._on_text_row)
@@ -7392,11 +7241,6 @@ class TemplateContentPanel(FloatingPanel):
         inner.setContentsMargins(0, 0, 0, 0)
         inner.setSpacing(4)
 
-        intro = QLabel("板子上真正被切掉的孔，位置与尺寸都可以改。")
-        intro.setWordWrap(True)
-        muted(intro)
-        inner.addWidget(intro)
-
         self.cutout_list = QListWidget()
         self.cutout_list.setFixedHeight(52)
         self.cutout_list.currentRowChanged.connect(self._on_cutout_row)
@@ -7496,10 +7340,7 @@ class TemplateContentPanel(FloatingPanel):
         self.not_a_card.setVisible(not is_card)
         self.apply_button.setVisible(not is_card)
         if not is_card:
-            self.not_a_card.setText(
-                "当前板子还不是【通行证】模板卡，所以没有可编辑的文字与挖槽。"
-                "点下面的按钮套用模板。"
-            )
+            self.not_a_card.setText("当前板子还不是【通行证】模板卡。")
         # The editors are hidden rather than left empty on a non-card: an empty
         # list plus a disabled search box is what "broken" looks like, whereas
         # one line of explanation plus a button is what "not yet" looks like.
@@ -7535,14 +7376,10 @@ class TemplateContentPanel(FloatingPanel):
         # new board's own set rather than the previous tab's.
         self._fill_art_list()
         if self._db:
-            self.status_label.setText(
-                f"干员资料库：{len(self._db)} 名　·　{self._db.source}"
-            )
-            info_surface(self.status_label)
+            note_text(self.status_label, "")
         else:
             self.status_label.setText(
-                "找不到干员资料库，搜索不可用；"
-                "模板文字与挖槽仍可编辑。\n"
+                "找不到干员资料库，搜索不可用；模板文字与挖槽仍可编辑。\n"
                 f"查找位置：{operators.db_path()}"
             )
             warn_surface(self.status_label)
@@ -7636,13 +7473,6 @@ class LayerPanel(QWidget):
         title = QLabel("图层")
         themed(title, lambda: f"color: {TEXT}; font-weight: 600; font-size: 13px;")
         layout.addWidget(title)
-
-        intro = QLabel(
-            "「当前」层接收新导入的图片；取消勾选即隐藏，隐藏的层不能被选中。"
-        )
-        intro.setWordWrap(True)
-        muted(intro)
-        layout.addWidget(intro)
 
         header = QWidget()
         header_layout = QHBoxLayout(header)
@@ -7844,13 +7674,7 @@ class GroupManagerPanel(FloatingPanel):
         layout = self.content_layout
         layout.setSpacing(6)
 
-        intro = QLabel(
-            "勾选要组合的元素，点【组合所选】。组合在导出时会写成 EDA 的"
-            "组合记录，在 EDA 里也显示为一个元素。"
-        )
-        intro.setWordWrap(True)
-        muted(intro)
-        layout.addWidget(intro)
+        self.group_list = QListWidget()
 
         self.status = QLabel()
         self.status.setWordWrap(True)
@@ -7902,7 +7726,7 @@ class GroupManagerPanel(FloatingPanel):
         self.selection_list.currentRowChanged.connect(self._on_selection_row)
         create_layout.addWidget(self.selection_list)
 
-        self.add_button = QPushButton("＋ 把画布上选中的元素加入")
+        self.add_button = QPushButton("＋ 加入画布上选中的元素")
         self.add_button.clicked.connect(self._on_add_selection)
         create_layout.addWidget(self.add_button)
 
@@ -8470,25 +8294,16 @@ class ImagePropertyPanel(QWidget):
         self._emit()
 
     def _refresh_layer_note(self) -> None:
-        """Say what the current layer means, including whether it is shown."""
+        """Say which colour the current layer paints, and whether it is shown."""
         key = self._placement.layer_key if self._placement is not None else None
         if key is None:
             self.layer_note.setText("")
             return
         item = layer(key)
-        text = f"颜色 {item.color}　·　{self._layer_meaning(item)}"
+        text = f"颜色 {item.color}"
         if self._layer_stack is not None and not self._layer_stack.is_visible(key):
             text += "　·　⚠ 该层当前已隐藏"
         self.layer_note.setText(text)
-
-    @staticmethod
-    def _layer_meaning(item) -> str:
-        return {
-            "copper": "铜箔层，成品呈金属色",
-            "silk": "丝印层，黑白图案",
-            "mask": "阻焊开窗，露出板材本色",
-            "outline": "板框层，决定切割外形",
-        }.get(item.kind, "")
 
     def _on_centre(self) -> None:
         if self._placement is None:
@@ -9034,7 +8849,7 @@ class DraftPanel(QWidget):
 
         self.save_button = QPushButton("保存草稿")
         self.save_button.setMinimumHeight(28)
-        self.save_button.setToolTip("把当前设计存进下面的草稿列表")
+        self.save_button.setToolTip("存进下面的草稿列表")
         self.save_button.clicked.connect(self.save_requested.emit)
         layout.addWidget(self.save_button)
 
@@ -9044,7 +8859,7 @@ class DraftPanel(QWidget):
         row_layout.setSpacing(4)
         self.new_button = QPushButton("新建")
         self.new_button.setMinimumHeight(24)
-        self.new_button.setToolTip("在新标签里开一块空板，现在的设计不会被动")
+        self.new_button.setToolTip("在新标签里开一块空板，不影响当前设计")
         self.new_button.clicked.connect(self.new_requested.emit)
         row_layout.addWidget(self.new_button)
 
@@ -9054,7 +8869,7 @@ class DraftPanel(QWidget):
         # share a word.
         self.save_as_button = QPushButton("另存为…")
         self.save_as_button.setMinimumHeight(24)
-        self.save_as_button.setToolTip("把当前设计另存成一份新草稿")
+        self.save_as_button.setToolTip("另存成一份新草稿")
         self.save_as_button.clicked.connect(self.save_as_requested.emit)
         row_layout.addWidget(self.save_as_button)
         layout.addWidget(row)
@@ -9081,15 +8896,10 @@ class DraftPanel(QWidget):
         self._list_area.setWidget(self._list_host)
         layout.addWidget(self._list_area, 1)
 
-        self.empty_label = QLabel("还没有草稿。点【保存草稿】存下当前设计。")
+        self.empty_label = QLabel("还没有草稿")
         self.empty_label.setWordWrap(True)
         muted(self.empty_label)
         layout.addWidget(self.empty_label)
-
-        hint = QLabel("单击打开；点行末的 ✎ 改名，右键可以删除。")
-        hint.setWordWrap(True)
-        muted(hint, size=10)
-        layout.addWidget(hint)
 
         self.refresh()
 
@@ -9221,7 +9031,7 @@ class DraftPanel(QWidget):
             subtitle += f"　·　{info.size_text}"
             row = DraftRow(info.name, subtitle, is_current, self._list_host)
             path = str(info.path)
-            row.setToolTip(f"{path}\n单击打开；点 ✎ 改名")
+            row.setToolTip(f"{path}\n单击打开；✎ 改名")
             row.clicked.connect(
                 lambda _=False, target=path: self.open_path_requested.emit(target)
             )
@@ -9842,11 +9652,10 @@ def confirm_discard_all(window, *, action: str = "退出") -> bool:
 
 
 def show_about(main_window: QWidget) -> None:
-    """What this build can actually do.
+    """The product summary and the version number.
 
-    Listed as capabilities and then a version number: the question a user has
-    about a tool mid-development is "will this do the thing", and the question
-    a user reporting a problem has is "which build was it".
+    The summary names what the tool does; the version answers "which build was
+    it" when a user reports a problem.
     """
     from pcbart import __version__
 
@@ -9854,20 +9663,30 @@ def show_about(main_window: QWidget) -> None:
         main_window,
         "关于",
         f"PCB 艺术板工具　v{__version__}\n\n"
-        "已可用的部分：\n"
+        "主要功能：\n"
         "· 多板并行编辑（顶部工程栏，可新建 / 切换 / 关闭）\n"
         "· 文件菜单：新建板子、另存为工程（.epro2）、"
         "另存为下单文件（Gerber 压缩包）\n"
         "· 导入图片、线稿转换、降噪、板画风格\n"
         "· 板框设置（矩形 / 圆角矩形 / 圆形 / 异形板 / 立牌）\n"
+        "· 通行证模板（干员搜索、二维码与条形码、卡面素材）\n"
         "· 图层显示与编辑（正反铜层 / 丝印层 / 阻焊层 / 板框层）\n"
         "· 画布缩放、平移、图片放置、尺寸调整与翻转旋转\n"
         "· 草稿库（保存在软件内，可重命名 / 删除）\n\n"
-        "尚未实现：走线风格、工艺校验接入导出、模板。\n\n"
         "许可证：GPL-3.0（GNU 通用公共许可证第 3 版）。\n"
         "完整条款见安装目录下的 LICENSE.txt；\n"
         "源代码：https://github.com/XiKaaaSaMa/EzPCBArtTool",
     )
+
+
+def show_shortcuts(main_window: QWidget) -> None:
+    """【帮助 → 快捷键】: the whole cheat sheet, on demand.
+
+    The lines come from ``shortcut_lines()``, which is assembled from the same
+    tuples the tests check the real bindings against -- so this page cannot
+    teach a key the window does not have.
+    """
+    QMessageBox.information(main_window, "快捷键", "\n".join(shortcut_lines()))
 
 
 #: How the user answers :func:`ask_print_kind`.
@@ -9909,7 +9728,7 @@ def ask_print_kind(main_window: QWidget, board, parent: QWidget | None = None):
     box.setInformativeText(
         "普通打板：图片会被描成填充图形，随普通 Gerber 一起生产，不开彩印。\n"
         "彩色丝印打板：保留原图配色，由嘉立创 EDA 出彩色丝印文件。\n\n"
-        "⚠️ 两者不是同一个东西：图片不会出现在普通 Gerber 里，"
+        "⚠️ 两者产出不同的板子：彩色丝印的图片不写入普通 Gerber，"
         "选错会让这些图案在成品上直接消失。"
     )
     normal = box.addButton("普通打板", QMessageBox.AcceptRole)
@@ -10387,7 +10206,7 @@ def build_window() -> QMainWindow:
     # than in 编辑, which is for editing the *board*. A theme is a property of
     # the application, and 视图 is where a user looks for it.
     add_items(menu.addMenu("视图"), ["图层…", "-", "界面设置…"])
-    add_items(menu.addMenu("帮助"), ["关于"])
+    add_items(menu.addMenu("帮助"), ["快捷键", "关于"])
 
     new_project_action = actions_by_name["新建板子"]
     export_action = actions_by_name["另存为工程…"]
@@ -10396,6 +10215,7 @@ def build_window() -> QMainWindow:
     open_draft_action = actions_by_name["打开草稿…"]
     quit_action = actions_by_name["退出"]
     about_action = actions_by_name["关于"]
+    shortcuts_action = actions_by_name["快捷键"]
     open_image_action = actions_by_name["打开图片…"]
     preprocess_action = actions_by_name["图像预处理…"]
     board_action = actions_by_name["板框设置…"]
@@ -10444,22 +10264,6 @@ def build_window() -> QMainWindow:
     window.export_action = export_action
     window.gerber_action = gerber_action
     window.new_project_action = new_project_action
-
-    banner = QLabel(
-        "导入图片会直接放到画布上，不生成板框；需要板框时点工具栏「板框设置」。"
-        "点击图片可选中，选中后拖动移动、拖四边小三角改尺寸。"
-    )
-    banner.setWordWrap(True)
-    themed(
-        banner,
-        lambda: f"""
-                    background: {WARNING_BG};
-                    color: {WARNING_FG};
-                    border-bottom: 1px solid {WARNING_EDGE};
-                    padding: 6px 12px;
-        """,
-    )
-    window._banner = banner
 
     canvas = DesignCanvas()
     window.design_canvas = canvas
@@ -10616,7 +10420,7 @@ def build_window() -> QMainWindow:
     new_tab_button = QToolButton()
     new_tab_button.setObjectName("NewProjectTab")
     new_tab_button.setText("＋")
-    new_tab_button.setToolTip("新建板子（在新标签里打开，不会动现在的这个）")
+    new_tab_button.setToolTip("新建板子（在新标签里打开，不影响当前板子）")
     new_tab_button.setCursor(Qt.PointingHandCursor)
     new_tab_button.setFixedSize(26, 24)
     new_tab_button.setFocusPolicy(Qt.NoFocus)
@@ -10662,7 +10466,6 @@ def build_window() -> QMainWindow:
     central_layout = QVBoxLayout(central)
     central_layout.setContentsMargins(0, 0, 0, 0)
     central_layout.setSpacing(0)
-    central_layout.addWidget(banner)
     central_layout.addWidget(tab_row)
     central_layout.addWidget(splitter, 1)
     window.setCentralWidget(central)
@@ -10738,12 +10541,33 @@ def build_window() -> QMainWindow:
     save_draft_action.triggered.connect(lambda: save_draft_clicked(window))
     open_draft_action.triggered.connect(lambda: open_draft_file(window))
 
+    # File-level shortcuts, the ones the cheat sheet teaches. They are installed
+    # here rather than in the menu table because the entries carry no shortcut
+    # yet -- and a cheat sheet naming a key nothing listens to would be the
+    # placeholder problem in miniature. ``WindowShortcut`` is what makes them
+    # fire wherever focus happens to be, the same rule the 编辑 menu follows.
+    for action, shortcut in (
+        (new_project_action, "Ctrl+N"),
+        (save_draft_action, "Ctrl+S"),
+        (export_action, "Ctrl+E"),
+        (gerber_action, "Ctrl+Shift+E"),
+        (open_draft_action, "Ctrl+O"),
+    ):
+        action.setShortcut(QKeySequence(shortcut))
+        action.setShortcutContext(Qt.WindowShortcut)
+    # Ctrl+Shift+S has to live on its own shortcut: one key sequence per
+    # action, and the draft panel's button is the shared implementation anyway.
+    save_as_shortcut = QShortcut(QKeySequence("Ctrl+Shift+S"), window)
+    save_as_shortcut.setContext(Qt.WindowShortcut)
+    save_as_shortcut.activated.connect(lambda: save_draft_as(window))
+
     quit_action.triggered.connect(window.close)
     open_image_action.triggered.connect(lambda: show_preprocess(window).drop_zone.browse())
     toolbar_by_name["打开图片"].triggered.connect(
         lambda: show_preprocess(window).drop_zone.browse()
     )
     about_action.triggered.connect(lambda: show_about(window))
+    shortcuts_action.triggered.connect(lambda: show_shortcuts(window))
     settings_action.triggered.connect(lambda: show_settings(window))
 
     # The settings panel searches up the parent chain for this, so it is bound
@@ -10754,7 +10578,7 @@ def build_window() -> QMainWindow:
 
     status = window.statusBar()
     themed(status, lambda: f"background: {PANEL_BG}; color: {MUTED};")
-    status.showMessage("就绪　·　尚未载入图片　·　点击「打开图片」开始")
+    status.showMessage("就绪")
 
     # The draft starts unnamed and empty, so the first save has nothing to
     # write yet. The fingerprint is taken now, which makes "no edits yet"

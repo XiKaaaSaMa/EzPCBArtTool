@@ -272,8 +272,7 @@ class LineRedrawPanel(QMainWindow):
             QUANTILE_MIN,
             QUANTILE_MAX,
             QUANTILE_DEFAULT,
-            "取响应最暗的百分之几作为线。调低只留最强的主线，调高会把弱线也描出来，"
-            "过高会把背景带进来。",
+            "取响应最暗的百分之几作为线；调低只留主线，调高描出弱线、过高带进背景。",
         )
         self.thicken_slider, self.thicken_value = self._slider_row(
             layout,
@@ -281,8 +280,7 @@ class LineRedrawPanel(QMainWindow):
             THICKEN_MIN,
             THICKEN_MAX,
             THICKEN_DEFAULT,
-            "每条线向两侧各长多少毫米。这是让它能印出来的那一半——"
-            "调太大相邻的线会粘连。",
+            "每条线向两侧各长多少毫米；这决定线能否印出来，调太大相邻线粘连。",
         )
 
         layout.addWidget(_divider())
@@ -436,13 +434,13 @@ class LineRedrawPanel(QMainWindow):
             QMessageBox.information(
                 self,
                 "没有找到线稿重绘模型",
-                "线稿重绘要用 Anime2Sketch 模型，安装包里不带它。\n\n"
+                "线稿重绘用 Anime2Sketch 模型，安装包不含。\n\n"
                 f"当前使用的文件夹：\n{directory}\n\n"
                 f"缺少：{'；'.join(report['missing'])}\n\n"
                 "获取：python tools\\fetch_anime2sketch.py\n"
-                "或把已下载好的模型文件夹放进上面那个位置，"
+                "或将已下载好的模型文件夹放进上面那个位置，"
                 "再到【视图 → 界面设置… → 线稿重绘模型】里选择\n"
-                "（也可以用环境变量 PCBART_A2S_MODEL 指定，它优先）。",
+                "（也可用环境变量 PCBART_A2S_MODEL 指定，它优先）。",
             )
             self.status.setText("未安装线稿重绘模型（其余功能不受影响）")
             return None, "cpu"

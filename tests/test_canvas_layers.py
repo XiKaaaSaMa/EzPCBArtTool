@@ -941,8 +941,6 @@ def test_the_canvas_draws_template_text_in_the_template_font(app):
         canvas = window.design_canvas
         canvas.fit_view()
         app.processEvents()
-        ppm = canvas._px_per_mm
-        origin = canvas.to_screen(0.0, 0.0)
 
         # A marker far off-board keeps the canvas from drawing its empty-state
         # hint, which would otherwise show up in every difference image.
@@ -966,6 +964,19 @@ def test_the_canvas_draws_template_text_in_the_template_font(app):
                 name="阿米娅", number="R001"
             )) is not None, item.label
 
+            # ⚠️ **Measured at a raised zoom, centred on the line under test.**
+            # At the fit scale the smallest line is ~8 px tall, and Qt's
+            # per-glyph rounding alone can add 12 px to an 11-glyph run -- 26%
+            # on ©HYPERGRYPH, which is the size of the face mismatch this test
+            # exists to catch (measured: 8.133 mm when the wrong family was
+            # pinned against 6.781 mm for the file's own face) and is why the
+            # old 25% tolerance let that bug through at this zoom. At 3x the
+            # rounding falls under 4%; the tolerance below sits between the two.
+            canvas.fit_view()
+            canvas.set_view_state((3.0, item.x_mm, item.y_mm))
+            app.processEvents()
+            ppm = canvas._px_per_mm
+
             board.texts = [marker]
             canvas.update()
             app.processEvents()
@@ -987,14 +998,10 @@ def test_the_canvas_draws_template_text_in_the_template_font(app):
 
             rendered = render_mask(item, name="阿米娅", number="R001")
             exported = rendered.size_mm[0]
-            # ⚠️ **The tolerance here is set by the zoom, not by the font.**
-            # At this view scale 1 px is ~0.15 mm, and the smallest line is
-            # rendered six pixels tall -- so its measured extent can be a large
-            # *fraction* away from the true width no matter how right the face
-            # is. What this test exists to catch is a substituted face, which
-            # moved a line by up to 2 mm (13%) at the same size; 25% bounds that
-            # while staying above the quantisation noise.
-            assert canvas_width == pytest.approx(exported, rel=0.25), (
+            # The tolerance sits between the two errors it has to tell apart:
+            # pixel quantisation at this zoom (measured worst 3.8%) and a
+            # substituted face (~18% on the line above).
+            assert canvas_width == pytest.approx(exported, rel=0.10), (
                 f"{item.label}: 画布 {canvas_width:.3f}mm / 导出 {exported:.3f}mm"
                 f"（画布 {ppm:.2f} px/mm，该行 {round(item.size_mm * ppm)} px 高）"
             )

@@ -294,6 +294,15 @@ def test_quit_is_connected_to_something(window):
 
 
 def test_about_says_what_the_tool_can_do(window, monkeypatch):
+    """The box names the features, which build this is, and the licence.
+
+    Asserting features by their own words rather than a whole sentence on
+    purpose: the wording is edited freely (the 2026-10-13 copy pass rewrote
+    it), but the box has to keep saying what the tool does, which build this
+    is, and where the source lives.
+    """
+    from pcbart import __version__
+
     messages: list[str] = []
     monkeypatch.setattr(
         gui_mockup.QMessageBox,
@@ -304,7 +313,11 @@ def test_about_says_what_the_tool_can_do(window, monkeypatch):
     all_actions(window)["关于"].trigger()
 
     assert messages
-    assert "导出" in messages[0]
+    text = messages[0]
+    assert "主要功能" in text
+    assert __version__ in text
+    assert "GPL-3.0" in text
+    assert "github.com" in text
 
 
 def test_zoom_actions_reach_the_canvas(window):

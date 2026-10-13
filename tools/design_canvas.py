@@ -44,6 +44,7 @@ from PySide6.QtGui import (
     QColor,
     QFont,
     QFontDatabase,
+    QFontMetricsF,
     QImage,
     QPainter,
     QPainterPath,
@@ -58,12 +59,67 @@ from pcbart.design_layers import layer
 from pcbart.image_size import UnreadablePicture, picture_size
 from pcbart.undo import UndoStack
 
-#: Resolved font families, keyed by the file the exporter would use.
-#:
-#: ``QFontDatabase.addApplicationFont`` loads the file once and returns an id;
-#: resolving it on every repaint would re-read the file. The value is the family
-#: Qt assigned, which is what a QFont has to be built from.
+#: Resolved font families, keyed by the file the exporter would use *and* the
+#: line of text: a file can declare several family names, and only a metrics
+#: comparison can say which of them Qt renders like the file -- which needs
+#: the text. The registration itself is cached separately, per file.
 _LOADED_FONT_FAMILIES: dict[str, str] = {}
+_FONT_FILE_FAMILIES: dict[str, list[str]] = {}
+
+
+def _families_for(path) -> list[str]:
+    """The family names ``path`` declares, registering the file the first time."""
+    names = _FONT_FILE_FAMILIES.get(str(path))
+    if names is None:
+        font_id = QFontDatabase.addApplicationFont(str(path))
+        names = (
+            list(QFontDatabase.applicationFontFamilies(font_id))
+            if font_id >= 0
+            else []
+        )
+        _FONT_FILE_FAMILIES[str(path)] = names
+    return names
+
+
+def _pin_family(path, families: list[str], text: str) -> str:
+    """The name in ``families`` that Qt renders like the file itself.
+
+    ⚠️ **A file's first family name is not safe to pin on its own.**
+    FRAMDCN.TTF -- the card's ``©HYPERGRYPH`` line -- declares
+    ``['Franklin Gothic', 'Franklin Gothic Medium Cond']``, and the bare
+    ``Franklin Gothic`` also matches the *installed* non-condensed faces:
+    pinning it drew the line 8.133 mm wide where the file's own face gives
+    6.781 mm. That is the same screen-vs-file mismatch this whole font dance
+    exists to prevent, and it survives review because both renderings are
+    legible type.
+
+    Qt's advance for each candidate is compared against the file's own (PIL)
+    advance; the closest match wins, and the first name stands when nothing
+    can be measured.
+    """
+    from PIL import Image, ImageDraw, ImageFont
+
+    size = 64
+    try:
+        pil_font = ImageFont.truetype(str(path), size)
+    except OSError:  # pragma: no cover - font_path already opened it
+        return families[0]
+    probe = Image.new("L", (1, 1), 255)
+    pil_width = ImageDraw.Draw(probe).textlength(text, font=pil_font)
+    if pil_width <= 0:
+        return families[0]
+
+    best, best_error = families[0], None
+    for name in families:
+        font = QFont()
+        font.setFamilies([name])
+        font.setPixelSize(size)
+        error = (
+            abs(QFontMetricsF(font).horizontalAdvance(text) - pil_width) / pil_width
+        )
+        if best_error is None or error < best_error:
+            best, best_error = name, error
+    return best
 
 
 def template_font(family: str, text: str) -> QFont:
@@ -94,14 +150,11 @@ def template_font(family: str, text: str) -> QFont:
     if path is None:
         return font
 
-    key = str(path)
+    key = f"{path}|{text}"
     resolved = _LOADED_FONT_FAMILIES.get(key)
     if resolved is None:
-        font_id = QFontDatabase.addApplicationFont(key)
-        families = (
-            QFontDatabase.applicationFontFamilies(font_id) if font_id >= 0 else []
-        )
-        resolved = families[0] if families else ""
+        families = _families_for(path)
+        resolved = _pin_family(path, families, text) if families else ""
         _LOADED_FONT_FAMILIES[key] = resolved
     if resolved:
         # ⚠️ **The family name is not enough on its own.** Qt resolves a family
@@ -110,8 +163,8 @@ def template_font(family: str, text: str) -> QFont:
         # than the one ``font_path`` picked -- measured at 7.997 mm from Qt
         # against 6.781 mm from FRAMDCN.TTF for the same string, which is
         # exactly the kind of mismatch between screen and file this whole
-        # exercise is about. ``setFamilies`` lists the file's own family first
-        # and Qt then pins the face to that registration.
+        # exercise is about. ``setFamilies`` lists the pinned name -- see
+        # :func:`_pin_family` for how that name is chosen.
         font.setFamilies([resolved])
     return font
 
@@ -1801,6 +1854,19 @@ class DesignCanvas(QWidget):
         paste.triggered.connect(self.paste)
 
     # --------------------------------------------------------------- input
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        """Double-click fits the board back into the view.
+
+        The preview window has offered this for a while; the canvas is the one
+        the cheat sheet teaches the gesture on, so leaving it out would teach a
+        gesture the canvas does not have. Only the button that selects: a
+        double middle-click should keep meaning "pan"."""
+        if event.button() == Qt.LeftButton:
+            self.fit_view()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt naming
         position = event.position()

@@ -115,17 +115,22 @@ def test_the_tab_row_starts_with_one_board(window):
     assert len(window.workspace) == 1
 
 
-def test_the_tab_row_sits_between_the_banner_and_the_work_area(window):
+def test_the_tab_row_sits_above_the_work_area(window):
     """The user asked for one row of tabs above the canvas: switching boards
-    has to be reachable without hunting through a menu."""
+    has to be reachable without hunting through a menu.
+
+    The bar is the topmost thing in the central layout. (The banner and the
+    keyboard cheat sheet that used to sit above it were both removed on
+    request -- the sheet now lives in 【帮助 → 快捷键】.)
+    """
     layout = window.centralWidget().layout()
     widgets = [layout.itemAt(index).widget() for index in range(layout.count())]
     tabs = window.project_tabs
-    # The bar's host row is the widget between the banner and the splitter,
-    # and the bar has to be in the central layout rather than floating.
+    # The bar's host row is in the central layout rather than floating.
     hosts = [item for item in widgets if item is not None and item.isAncestorOf(tabs)]
     assert len(hosts) == 1, "工程栏应在主布局里"
-    assert widgets.index(hosts[0]) == 1, "工程栏应紧跟在提示条下面、画布上面"
+    assert widgets.index(hosts[0]) == 0, "工程栏应在画布上面、窗口最上方"
+    assert len(widgets) == 2, "工程栏与工作区之外不应再有常驻部件"
 
 
 def test_the_plus_button_is_visible_and_opens_a_board(window, app):
