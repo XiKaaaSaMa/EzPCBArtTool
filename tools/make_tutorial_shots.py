@@ -52,20 +52,24 @@ def artwork(work: Path) -> str:
     return str(path)
 
 
-def setup(window, app, image: str, style: str | None = None):
+def setup(window, app, image: str, style: str | None = None, reading: str | None = None):
     """Load, configure, then import -- in that order, and the order matters.
 
     The style describes the *next* import, so setting it after the import
     changes the panel's preview but leaves the canvas holding the previous
     style. That is correct behaviour, not a quirk to work around: get the
     sequence wrong here and the screenshot shows one style in the preview box
-    and another on the canvas.
+    and another on the canvas. The 读法 is the same kind of control and is set
+    the same way; ``reading`` takes a key from ``g.READING_OPTIONS``.
     """
     panel = g.show_preprocess(window)
     panel.load_image(image)
     if style is not None:
         names = [name for name, _ in g.STYLE_OPTIONS]
         panel.style_combo.setCurrentIndex(names.index(style))
+    if reading is not None:
+        order = [key for key, _label, _hint in g.READING_OPTIONS]
+        panel.reading_combo.setCurrentIndex(order.index(reading))
     panel.import_to_canvas()
     window.design_canvas.fit_view()
     app.processEvents()
@@ -155,6 +159,44 @@ def state_drafts(window, app, image):
     app.processEvents()
 
 
+def state_xdog(window, app, image):
+    """The XDoG reading on the canvas: the finest of the five.
+
+    Shown on the canvas rather than in a panel because the difference between
+    the readings *is* the drawing they produce -- a dropdown screenshot would
+    show five names and nothing about which one keeps a hair strand.
+    """
+    panel = setup(window, app, image, style="线稿", reading=g.READING_XDOG)
+    panel.place_top_right()
+    panel.raise_()
+
+
+def state_ridge(window, app, image):
+    """The ridge reading: bolder, continuous strokes."""
+    panel = setup(window, app, image, style="线稿", reading=g.READING_RIDGE)
+    panel.place_top_right()
+    panel.raise_()
+
+
+def state_presteps(window, app, image):
+    """The 图像预处理 section, which is where 超分 and 滤镜 live.
+
+    The panel is scrolled so 5-7 are in view (the window grab alone would show
+    only the upload box): the point of the shot is *where* the new controls
+    are, and they sit below the fold in every other screenshot.
+    """
+    panel = g.show_preprocess(window)
+    panel.load_image(image)
+    app.processEvents()
+    panel.resize(panel.width(), 760)
+    panel.place_top_right()
+    panel.raise_()
+    app.processEvents()
+    scroll = panel._scroll.verticalScrollBar()
+    scroll.setValue(int(scroll.maximum() * 0.62))
+    app.processEvents()
+
+
 STATES = {
     "01-interface": state_main,
     "02-lineart": state_lineart,
@@ -164,6 +206,9 @@ STATES = {
     "06-standee": state_standee,
     "07-drafts": state_drafts,
     "08-irregular": state_irregular,
+    "09-xdog": state_xdog,
+    "10-ridge": state_ridge,
+    "11-presteps": state_presteps,
 }
 
 
