@@ -227,12 +227,17 @@ cd "P:\Zcode开发专用文件夹\PCB工具打包测试"
 python -m PyInstaller --clean --noconfirm "PCB艺术板工具.spec"
 
 :: 3) 生成安装包，版本号按第一节的规则填（先问用户是哪种版本）
-"%USERPROFILE%\InnoSetup\ISCC.exe" /DAppVersion=1.0.0 "安装包.iss"
+"%USERPROFILE%\InnoSetup\ISCC.exe" /DAppVersion=1.0.4 installer.iss
 
 :: 4) 把安装包归档到 安装包保存区 下对应版本类型的子目录
 ```
 
 `/DAppVersion=` 覆盖 `.iss` 里的默认值，**改版本不需要编辑脚本**。
+
+⚠️ **脚本文件名是 `installer.iss`**（本文档早先写成 `安装包.iss`，按错的写会报
+「系统找不到指定的文件」，且不带文件名提示——1.0.4 打包时踩到，已修正）。
+⚠️ **ISCC 要在 Git Bash 里加 `MSYS_NO_PATHCONV=1`**，否则 `/DAppVersion=` 被
+MSYS 当路径转换吃掉。
 
 ### 产物
 
@@ -266,7 +271,7 @@ find . -type f -not -path './.git/*' -not -path '*__pycache__*' | wc -l
 
 ---
 
-## 四、⚠️ 打包前必须检查的路径约束
+## 四、⚠️ 打包与发布前必须检查的事项
 
 这些是踩过的坑，改动代码时**不要破坏**。
 
@@ -329,6 +334,24 @@ python -c "对比 new.png 与你删之前那张的 sha256"
 
 ⚠️ 打包后验证一次：启动后【图像预处理 → 滤镜】下拉框应当可用；
 被禁用（并写明原因）意味着 `java_lineart/` 没进包或机器没装 Java。
+
+### 6. 发布脚本取 GitHub 令牌：`git credential fill` 必须带 `username=`
+
+**不带 `username=` 会挂起**：本机凭据助手是 Git Credential Manager，凭据按账号
+存；只给 `protocol`/`host` 时它定不了账号，回落到交互式提示——无人值守时表现为
+「无输出、无报错、Release 没建」（2026-10-14 连测两次才定位）。正确写法：
+
+```python
+subprocess.run(["git", "credential", "fill"],
+               input="protocol=https
+host=github.com
+username=XiKaaaSaMa
+
+", ...)
+```
+
+实测带上后 0.4 s 返回。发布脚本在
+`out/2026.10.14test/_release/publish_github_1.0.4.py`（可直接改成下一个版本用）。
 
 ---
 

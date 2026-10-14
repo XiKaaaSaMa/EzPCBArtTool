@@ -6,7 +6,7 @@ appears is :mod:`pcbart.units`.
 
 from __future__ import annotations
 
-__version__ = "1.0.1"
+__version__ = "1.0.4"
 
 from .epru import EproArchive, EproDocument, Record, split_record_line
 from .units import EPRU_UNIT_MM, mm_to_unit, unit_to_mm
