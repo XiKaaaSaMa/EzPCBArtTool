@@ -37,3 +37,9 @@
 *.otf binary
 *.woff binary
 *.woff2 binary
+# The Java filter tool (java_lineart/): the jar and the prebuilt class ship so
+# a machine with a JRE but no JDK can run 【滤镜】. A line-ending rewrite would
+# make the class file one the JVM refuses to load, and nothing would notice
+# until a user picked a filter.
+*.jar binary
+*.class binary

@@ -20,11 +20,17 @@
 ```bat
 python -m pip install -r requirements.txt
 run.bat                :: 启动界面
-run.bat test           :: 跑测试（当前 1700 项）
+run.bat test           :: 跑测试（当前 1840 项）
 ```
 
 Python **3.11 / 3.12**（`run.bat` 自己找解释器）。GUI 用 PySide6；
 `pcbart/` 核心库**不依赖 Qt**，可以脱离界面单独测 —— 请保持这条分界。
+
+**Java（JRE 8+）是可选的**，只被【滤镜】用到：`java_lineart/`（JH Labs 滤镜，
+随仓库分发）由 `pcbart/java_filters.py` 以子进程调用。没有 Java 时该功能
+在界面上禁用并写明原因，**其余功能与测试完全不受影响**（相关用例自动 skip）。
+⚠️ 打包时它**不是** Python 依赖，PyInstaller 不会自动收集，
+见 `docs/PACKAGING.md` 第四节第 5 条。
 
 ### 2. 素材库在仓库外，路径必须走 `asset_root()`
 
@@ -50,7 +56,7 @@ fixture 兜住 pytest；**临时脚本必须自己设** `PCBART_DRAFTS_DIR`。
 
 ### 4. 提交前
 
-- 跑完整测试：**1700 项**（基线，只许涨）
+- 跑完整测试：**1840 项**（基线，只许涨）
 - **别提交** `out/`、`.epro2`、`.epru`（除 `tests/fixtures/`）、模型权重
 - 提交信息写**做了什么、为什么**；这个项目的规矩是「结论要能追溯到实测」
 - **push 之前先署名**：`docs/工作记录.md` 要有本轮的一行，

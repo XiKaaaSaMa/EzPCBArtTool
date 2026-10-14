@@ -41,10 +41,13 @@ __all__ = [
     "RADIUS_RATIO",
     "MIN_RADIUS",
     "MAX_RADIUS",
+    "READING_REFERENCE_LONG_SIDE",
+    "RIDGE_PREVIEW_TRACE_SIDE",
     "auto_radius",
     "desaturate",
     "local_max",
     "dodge_response",
+    "xdog_response",
     "line_art",
     "line_art_preview",
     "outer_outline",
@@ -126,6 +129,22 @@ class LineArtParams:
     *flat two-tone* drawing -- which is why ``"fill"`` remains the default -- but
     it is too coarse for a soft-shaded illustration, where the mid-tones carry
     the detail the user is looking at.
+
+    ``"xdog"`` -- the XDoG soft threshold of Kazuhito00's sample, ported via the
+    线稿工坊 workspace. A difference of Gaussians, sliced with a tanh rather
+    than a hard level, which keeps faint strokes as thin strokes instead of
+    dropping them; the output is then cut to the mask at
+    :attr:`xdog_level`. Measured on 惊蛰 at the defaults it is the *finest* of
+    the readings (6.1% ink at level 128): hair strands and the weapon's
+    hatching survive, which is why it joined the panel.
+
+    ``"ridge"`` -- multi-scale ridge detection (Meijering, via the workspace's
+    scikit-image panel, reimplemented dependency-free in :mod:`pcbart.ridge`).
+    It asks "is this pixel the centre of a dark strand?" instead of "is this a
+    boundary?", so it draws bold continuous strokes -- measured 10.0% ink on
+    the same picture, visibly heavier than XDoG's. The two new readings are not
+    replacements for the three above: on flat two-tone line art they overdraw
+    (see each reading's note), which is what 填充色块 remains for.
     """
     threshold: float = 0.46
     """Response level that separates ink from paper, 0..1.
@@ -256,6 +275,77 @@ class LineArtParams:
     so a script still gets a sensible drawing.
     """
 
+    # ------------------------------------------------------ XDoG (Kazuhito00)
+    # The five upstream parameters plus the level that makes the soft response
+    # binary. Defaults are the upstream's own (Kazuhito00/XDoG-OpenCV-Sample,
+    # MIT), which is also what the 线稿工坊 workspace's panel ships.
+
+    xdog_sigma: float = 1.4
+    """XDoG blur radius, in pixels at a 1000 px long side (see the ratio note
+    on :func:`xdog_response`). Sets the width of the lines the filter calls a
+    line; it is the XDoG control users move first."""
+
+    xdog_k: float = 1.6
+    """Ratio of the second blur radius to the first. The classic DoG value;
+    larger values widen the halo around every stroke."""
+
+    xdog_epsilon: float = 0.0
+    """Response level the soft threshold sits at, the upstream's ``epsilon``
+    (its slider is -1..1 and it divides by 255 before use). Higher values keep
+    faint edges; lower values let more of the picture cross into ink."""
+
+    xdog_phi: float = 10.0
+    """Steepness of the soft threshold. Low values ramp gently (a pencil
+    look), high values approach a hard cut."""
+
+    xdog_gamma: float = 0.98
+    """Weight of the wider blur when the two are subtracted. The upstream
+    default is very close to 1, which is what keeps flat areas at paper
+    white."""
+
+    xdog_level: int = 128
+    """Level (0..255) that turns the soft response into a mask; ink below it.
+
+    Needed because the upstream panel returns a *soft* image and this tool's
+    masks must be strictly two-tone -- silkscreen cannot print a grey pixel.
+    Measured on 惊蛰 at the defaults: level 64 -> 4.4% ink, 128 -> 6.1%,
+    192 -> 7.9%, so the slider moves the ink share the way the readout says.
+    """
+
+    # --------------------------------------------------- ridge (scikit-image)
+    # The 线稿工坊 workspace's 脊线 panel: skimage.filters.meijering. The port
+    # in pcbart.ridge is verified against scikit-image; these keep the
+    # workspace's names and defaults.
+
+    ridge_sigma_min: float = 1.0
+    """Smallest scale of the ridge filter, in pixels at a 1000 px long side."""
+
+    ridge_sigma_max: float = 3.0
+    """Largest scale. The filter reports the strongest response over the scales
+    in between, so this end picks up the widest strands."""
+
+    ridge_steps: int = 5
+    """How many scales to sample between the two ends (scikit-image's own
+    default is five; more scales cost time linearly)."""
+
+    ridge_black: bool = True
+    """Detect dark ridges. Off selects bright ones instead -- the polarity of
+    the *drawing*, not of the output: the mask is always ink-on-paper."""
+
+    ridge_percentile: float = 50.0
+    """Percentile of the ridge response kept as ink.
+
+    ⚠️ **Ranked over the pixels that respond**, not over the whole picture:
+    keep the strongest ``100 - percentile``% of the strands. The workspace's
+    panel ranks over every pixel, which is the same answer on a smoothly shaded
+    illustration but floods hard-edged artwork -- see the ridge branch in
+    :func:`line_art` for the measurement. The default is 50 rather than the
+    workspace's 90 for that reason: **50 here reproduces what the workspace's
+    90 draws** (both keep the strongest 10% of the ink on 惊蛰, measured 9.99%
+    against 10.0%), while staying sane on hard-edged artwork where its 90 turns
+    the page black. The panel's readout always shows the share that came out.
+    """
+
     def normalised(self) -> "LineArtParams":
         """Clamp to usable ranges."""
         width = int(self.silhouette_width)
@@ -275,6 +365,17 @@ class LineArtParams:
                 )
             ),
             outline_width_mm=float(np.clip(self.outline_width_mm, 0.10, 1.0)),
+            xdog_sigma=float(np.clip(self.xdog_sigma, 0.1, 40.0)),
+            xdog_k=float(np.clip(self.xdog_k, 1.05, 5.0)),
+            xdog_epsilon=float(np.clip(self.xdog_epsilon, -1.0, 1.0)),
+            xdog_phi=float(np.clip(self.xdog_phi, 0.1, 80.0)),
+            xdog_gamma=float(np.clip(self.xdog_gamma, 0.1, 2.0)),
+            xdog_level=int(np.clip(int(self.xdog_level), 1, 254)),
+            ridge_sigma_min=float(np.clip(self.ridge_sigma_min, 0.1, 20.0)),
+            ridge_sigma_max=float(np.clip(self.ridge_sigma_max, 0.1, 40.0)),
+            ridge_steps=int(np.clip(int(self.ridge_steps), 1, 8)),
+            ridge_black=bool(self.ridge_black),
+            ridge_percentile=float(np.clip(self.ridge_percentile, 0.0, 100.0)),
             denoise=False,
             denoise_kernel=5,
             despeckle_area=0,
@@ -419,6 +520,65 @@ def dodge_response(
     if multiply_by_brightness:
         return np.clip(dodge * grey01, 0.0, 1.0)
     return dodge
+
+
+#: The long side at which the XDoG and ridge readings' size-class parameters
+#: mean what their sliders say.
+#:
+#: Both algorithms measure their scale in *pixels*, and both were tuned (in the
+#: 线稿工坊 workspace these readings come from) at a 1000 px reference long
+#: side: sigma 1.4 is "1.4 px on a 1000 px picture". Multiplying by the
+#: picture's own long side over this constant keeps the same amount of detail
+#: whatever the source resolution is -- the rule :mod:`pcbart.work_scale`
+#: exists to enforce for every other resolution-dependent number.
+READING_REFERENCE_LONG_SIDE = 1000.0
+
+
+#: Long side the ridge reading's *live preview* is traced at; see
+#: :func:`line_art_preview` for the measurement behind it.
+RIDGE_PREVIEW_TRACE_SIDE = 1000
+
+
+def xdog_response(
+    grey8: np.ndarray,
+    sigma: float,
+    k_sigma: float,
+    gamma: float,
+    epsilon: float,
+    phi: float,
+) -> np.ndarray:
+    """The Kazuhito00 XDoG soft response, in the upstream's own 0..255 scale.
+
+    Ported from ``Kazuhito00/XDoG-OpenCV-Sample`` (MIT) via the 线稿工坊
+    workspace's ``algorithms/xdog_kazuhito.py``, which already checked the port
+    line by line. **Low values are ink**: the response goes dark where a pixel
+    is darker than its surroundings, and stays at 255 across flat areas.
+
+    The steps are the upstream's, in the upstream's order:
+
+    1. ``dog = G_sigma - gamma * G_{k*sigma}`` on the **uint8** grey plane, so
+       the blur quantises the same way the reference implementation did;
+    2. divide by the picture's own maximum -- this is the upstream's
+       normalisation, and it is why the same settings give a brighter or
+       darker drawing on different artwork;
+    3. ``e = 1 + tanh(phi * (dog - epsilon))``, clipped at 1.
+
+    The upstream (and the workspace port) returns this soft image as the
+    finished panel; this tool's masks must be strictly binary, so the caller
+    puts it through :attr:`LineArtParams.xdog_level`. A flat picture -- no
+    response anywhere -- returns all-255 rather than dividing by zero, matching
+    the workspace port's guard.
+    """
+    g1 = cv2.GaussianBlur(grey8, (0, 0), float(sigma)).astype(np.float64)
+    g2 = cv2.GaussianBlur(grey8, (0, 0), float(sigma) * float(k_sigma)).astype(np.float64)
+    dog = g1 - float(gamma) * g2
+    maximum = float(dog.max())
+    if maximum < 1e-9:
+        return np.full(grey8.shape, 255.0, dtype=np.float64)
+    dog = dog / maximum
+    response = 1.0 + np.tanh(float(phi) * (dog - float(epsilon) / 255.0))
+    np.minimum(response, 1.0, out=response)
+    return np.clip(response * 255.0, 0.0, 255.0)
 
 
 #: Ratio between the detector's two blur radii.
@@ -1366,7 +1526,7 @@ def line_art(
                 lines = np.logical_or(lines, outline > 0)
 
         traced = np.where(lines, 0, traced).astype(np.uint8)
-    else:
+    elif params.mode == "dodge":
         radius = auto_radius(grey.shape, params.strength)
         response = dodge_response(
             grey, radius, multiply_by_brightness=params.multiply_by_brightness
@@ -1385,6 +1545,73 @@ def line_art(
             outline = silhouette_outline(alpha, params.silhouette_width, image)
             if outline.shape[:2] == traced.shape[:2]:
                 traced = np.where(outline > 0, 0, traced).astype(np.uint8)
+    elif params.mode == "xdog":
+        # Kazuhito00's soft threshold, cut to the mask at ``xdog_level``. The
+        # sigma is a count of pixels *at the reference long side*, so it is
+        # scaled by the picture's own -- see :data:`READING_REFERENCE_LONG_SIDE`
+        # for why a fixed pixel count cannot work here.
+        long_side = float(max(grey.shape[:2]))
+        sigma = max(0.1, params.xdog_sigma * long_side / READING_REFERENCE_LONG_SIDE)
+        response = xdog_response(
+            grey8,
+            sigma,
+            params.xdog_k,
+            params.xdog_gamma,
+            params.xdog_epsilon,
+            params.xdog_phi,
+        )
+        traced = np.where(response < float(params.xdog_level), 0, 255).astype(np.uint8)
+        if params.silhouette:
+            outline = silhouette_outline(alpha, params.silhouette_width, image)
+            if outline.shape[:2] == traced.shape[:2]:
+                traced = np.where(outline > 0, 0, traced).astype(np.uint8)
+    elif params.mode == "ridge":
+        from .ridge import meijering_response
+
+        long_side = float(max(grey.shape[:2]))
+        smallest = max(
+            0.2, params.ridge_sigma_min * long_side / READING_REFERENCE_LONG_SIDE
+        )
+        largest = max(
+            smallest, params.ridge_sigma_max * long_side / READING_REFERENCE_LONG_SIDE
+        )
+        sigmas = np.linspace(smallest, largest, max(1, int(params.ridge_steps)))
+        response = meijering_response(grey, sigmas, black_ridges=params.ridge_black)
+
+        # ⚠️ **The percentile ranks the pixels that respond, not the whole
+        # picture.** The workspace's panel (and the ``skimage`` panel it wraps)
+        # takes the percentile over every pixel, which is the same thing on a
+        # smoothly shaded illustration -- measured 10.0% ink at the 90th
+        # percentile on 惊蛰 -- but breaks on hard-edged artwork: a flat region
+        # gives a ridge response of exactly zero (or a float-sized floor), so
+        # on a hard-edged drawing 85-95% of the picture sits on one value, a
+        # percentile anywhere in the middle lands *inside* that plateau, and the
+        # mask comes out as a black rectangle at every setting. Measured on a
+        # synthetic hard-edged drawing: 85.4% ink here against 100.0% through
+        # scikit-image's own numbers.
+        #
+        # Ranking the responding pixels keeps the control meaning what its label
+        # says -- "keep the strongest (100 - percentile)% of the strands" -- and
+        # degrades honestly: no response at all (blank paper) gives no ink
+        # rather than a filled page. The panel's readout reports the ink share
+        # that actually came out either way.
+        responding = response[response > 0]
+        percentile = float(params.ridge_percentile)
+        if responding.size == 0:
+            traced = np.full(grey.shape, 255, dtype=np.uint8)
+        else:
+            level = float(np.percentile(responding, percentile))
+            traced = np.where(response >= level, 0, 255).astype(np.uint8)
+        if params.silhouette:
+            outline = silhouette_outline(alpha, params.silhouette_width, image)
+            if outline.shape[:2] == traced.shape[:2]:
+                traced = np.where(outline > 0, 0, traced).astype(np.uint8)
+    else:
+        # ⚠️ **An unknown mode used to fall through to dodge.** A typo in a
+        # caller then produced a plausible drawing from the wrong algorithm,
+        # which is the silent-substitution failure this codebase keeps
+        # rejecting. Every reading is a named branch now.
+        raise ValueError(f"未知的线稿读法: {params.mode}")
 
     if params.mode == "fill":
         traced = _despeckle_tone(traced)
@@ -1437,8 +1664,34 @@ def line_art_preview(
     # One reduction up front, bounded by the working budget, and everything
     # after it works on that copy.
     trace_scale = work_scale(width, height)
+    ridge_cap = (
+        RIDGE_PREVIEW_TRACE_SIDE / max(1, max(height, width))
+        if (params or LineArtParams()).mode == "ridge"
+        else 1.0
+    )
+    # ⚠️ **The ridge reading is bounded harder, and only for the live preview.**
+    # Its cost is a full Hessian per scale: measured **330 ms at 1000 px and
+    # 733 ms at 2000 px** against 36-58 ms for everything any other reading
+    # does, so at the work budget a slider tick would bring back the 调参卡顿
+    # this panel was fixed for. Both of its sigmas are a *fraction of the long
+    # side*, so a smaller trace draws the same drawing on a coarser grid rather
+    # than a different one; the settled pass (``max_side is None``) still traces
+    # at the work budget, which is the arrangement 弧线平滑 already uses.
+    trace_scale = min(trace_scale, ridge_cap)
     if trace_scale < 1.0:
-        image, alpha, trace_scale = prepare_working_image(image, alpha)
+        if trace_scale < work_scale(width, height):
+            # The ridge cap is stricter than the work budget. Reducing here
+            # rather than on top of ``prepare_working_image`` keeps it one
+            # resample instead of two.
+            size = (
+                max(1, int(round(width * trace_scale))),
+                max(1, int(round(height * trace_scale))),
+            )
+            image = cv2.resize(image, size, interpolation=cv2.INTER_AREA)
+            if alpha is not None:
+                alpha = cv2.resize(alpha, size, interpolation=cv2.INTER_AREA)
+        else:
+            image, alpha, trace_scale = prepare_working_image(image, alpha)
         params = _rescaled_params(params, trace_scale)
         # The masks belong to the picture that was handed in. After a reduction
         # they describe a different (larger) grid, so they cannot be reused --

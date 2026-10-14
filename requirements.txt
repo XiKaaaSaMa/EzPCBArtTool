@@ -25,3 +25,11 @@ PySide6>=6.6
 # Everything else works without it. See the README section "外接模型".
 # torch>=2.0
 
+# Optional, tests only, and deliberately commented out: the 脊线 reading is a
+# numpy/OpenCV reimplementation of scikit-image's Meijering filter, and
+# ``tests/test_ridge.py`` compares the two when scikit-image is installed
+# (skipping that comparison when it is not). Nothing in ``pcbart/`` imports it,
+# and scipy/networkx/imageio/tifffile come with it -- about 150 MB unpacked for
+# a test reference is not something to require of every install.
+# scikit-image>=0.22
+

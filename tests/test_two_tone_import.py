@@ -187,7 +187,8 @@ def test_the_style_controls_are_hidden_while_processing_is_off(app, tmp_path):
             panel.style_group,
             panel.layer_group,
             panel.tuning_section,
-            panel.denoise_section,
+            panel.prestep_section,
+            panel.cleanup_section,
             panel.preview_section,
         ):
             assert not widget.isVisible(), "不处理时不该显示处理相关的控件"

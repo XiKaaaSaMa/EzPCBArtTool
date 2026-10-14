@@ -122,7 +122,8 @@ def test_the_line_art_sections_are_hidden_while_painting(painting_panel):
     panel has already been burned by.
     """
     assert not painting_panel.tuning_section.isVisible()
-    assert not painting_panel.denoise_section.isVisible()
+    assert not painting_panel.prestep_section.isVisible()
+    assert not painting_panel.cleanup_section.isVisible()
     assert painting_panel.board_art_section.isVisible()
 
 
@@ -131,7 +132,8 @@ def test_the_board_art_sections_are_hidden_for_line_art(painting_panel):
         [name for name, _hint in STYLE_OPTIONS].index("线稿")
     )
     assert painting_panel.tuning_section.isVisible()
-    assert painting_panel.denoise_section.isVisible()
+    assert painting_panel.prestep_section.isVisible()
+    assert painting_panel.cleanup_section.isVisible()
     assert not painting_panel.board_art_section.isVisible()
     assert painting_panel.presentation_row.isVisible()
     assert painting_panel.side_control.isVisible()
@@ -218,7 +220,8 @@ def test_colour_style_hides_every_processing_section(painting_panel):
     )
 
     assert not painting_panel.tuning_section.isVisible()
-    assert not painting_panel.denoise_section.isVisible()
+    assert not painting_panel.prestep_section.isVisible()
+    assert not painting_panel.cleanup_section.isVisible()
     assert not painting_panel.board_art_section.isVisible()
     assert not painting_panel.preview_section.isVisible()
 
@@ -228,7 +231,8 @@ def test_line_art_shows_the_processing_sections(painting_panel):
         [name for name, _hint in STYLE_OPTIONS].index("线稿")
     )
     assert painting_panel.tuning_section.isVisible()
-    assert painting_panel.denoise_section.isVisible()
+    assert painting_panel.prestep_section.isVisible()
+    assert painting_panel.cleanup_section.isVisible()
     assert painting_panel.preview_section.isVisible()
 
 

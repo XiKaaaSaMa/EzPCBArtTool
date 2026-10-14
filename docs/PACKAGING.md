@@ -311,6 +311,25 @@ ffmpeg 等）。**删任何 DLL 都要重新跑一次并比对截图哈希**，
 python -c "对比 new.png 与你删之前那张的 sha256"
 ```
 
+### 5. `java_lineart/` 必须随包分发（2026-10-13 起）
+
+【滤镜】模块通过子进程调用 `java_lineart/`（`pcbart/java_filters.py`）。
+它**不是** Python 依赖，PyInstaller 不会自动收集，`.spec` 要把它当数据
+目录带进应用目录：
+
+```python
+# PCB艺术板工具.spec 的 Analysis(datas=[...]) 里加：
+    ('java_lineart', 'java_lineart'),
+```
+
+保留 `src/`、`lib/`、`classes/` 三部分即可：`classes/` 里的 `.class` 是
+`--release 8` 预编译的，用户装了 JRE 8+ 就能跑，不必装 JDK。
+`pcbart/java_filters.tool_dir()` 先在源码树里找、再在**可执行文件旁边**
+找 `java_lineart/`，所以打包后放在应用目录根下即可。
+
+⚠️ 打包后验证一次：启动后【图像预处理 → 滤镜】下拉框应当可用；
+被禁用（并写明原因）意味着 `java_lineart/` 没进包或机器没装 Java。
+
 ---
 
 ## 五、发布前验证清单

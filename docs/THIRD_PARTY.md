@@ -98,6 +98,32 @@ ttf/otf）。内嵌一个加载不了的字体是纯粹的成本。所以字体�
 | 来源 | 内容 | 许可证 |
 |---|---|---|
 | PCB_lightgraph | 高斯预滤波、去杂点（`pcbart/denoise.py`） | MIT |
+| Kazuhito00/XDoG-OpenCV-Sample | XDoG 软阈值线稿（`pcbart/lineart.py` 的 `xdog_response`） | MIT |
+| scikit-image | Meijering 脊线滤波，复刻在 `pcbart/ridge.py` | BSD-3-Clause |
+| bloc97/Anime4K v0.9 | 超分（`pcbart/upscale.py`，经 TianZerL/Anime4KPython 参考实现） | MIT |
+| scipy | 高斯导数核（`pcbart/ridge.py` 的 `_scipy_kernel1d` 按同一公式重写） | BSD-3-Clause |
+
+⚠️ **scikit-image 只用作测试对照，不是运行依赖**：`pcbart/ridge.py` 把
+Meijering 滤波用 numpy + OpenCV 重写（逐点与 scikit-image 比对，最大差
+3e-7；速度约快 5 倍），`tests/test_ridge.py` 在本机装了 scikit-image 时
+拿它当参照，没装就跳过。所以 `requirements.txt` 里没有 scipy / scikit-image。
+
+---
+
+## 随本工具分发的 Java 工具
+
+`java_lineart/` 是本仓库自带的小工具，由主程序以子进程方式调用
+（`pcbart/java_filters.py`），提供 16 个 JH Labs 滤镜。
+
+| | |
+|---|---|
+| JH Labs Filters | https://github.com/axet/jhlabs ｜ **Apache-2.0** ｜ `java_lineart/lib/filters-2.0.235-1.jar`（373 KB） |
+| 许可全文 | `java_lineart/lib/jhlabs_LICENSE.txt` |
+| 包装代码 | `java_lineart/src/LineArtJavaTool.java`（本项目自写，随本仓库 GPL-3.0） |
+| 预编译产物 | `java_lineart/classes/LineArtJavaTool.class`（`--release 8`，装 JRE 即可运行） |
+
+⚠️ **需要机器上有 Java（JRE 8+）**：这是本工具唯一的功能性外部依赖。没有
+Java 时其余功能完全正常，滤镜下拉框会被禁用并在面板上写明原因。
 
 ---
 

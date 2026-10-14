@@ -78,6 +78,7 @@ from pcbart.draft import (  # noqa: E402
     save_draft,
 )
 from pcbart import operators  # noqa: E402
+from pcbart.java_filters import FILTERS, FILTER_LABELS, NO_FILTER  # noqa: E402
 from pcbart.projects import UNTITLED, Project, Workspace  # noqa: E402
 from pcbart.ui_theme import (  # noqa: E402
     PRESETS,
@@ -884,13 +885,16 @@ RAW_STYLE = "__raw__"
 #:   is for -- so the description below names both audiences rather than
 #:   claiming a winner.
 #:
-#: ⚠️ ``dodge`` **must stay at the end of the tuple**. ``_reset_tuning``
-#: returns to index 0 and several tests look options up by key, but the default
-#: reading is a promise as well: inserting above ``fill`` would silently change
-#: what a fresh import does.
+#: ⚠️ ``fill`` **must stay first, and existing readings keep their relative
+#: order**. ``_reset_tuning`` returns to index 0, so the default reading is a
+#: promise as well: inserting anything above ``fill`` would silently change what
+#: a fresh import does. New readings are appended at the end -- 纯线条 was, and
+#: so were XDoG and 脊线 after it; a test pins the two rules.
 READING_FILL = "fill"
 READING_OUTLINE = "outline"
 READING_DODGE = "dodge"
+READING_XDOG = "xdog"
+READING_RIDGE = "ridge"
 
 READING_OPTIONS: tuple[tuple[str, str, str], ...] = (
     (
@@ -907,6 +911,38 @@ READING_OPTIONS: tuple[tuple[str, str, str], ...] = (
         READING_DODGE,
         "纯线条",
         "只描「比周围暗」的边，深色立绘不涂黑块；浅色平涂图易出碎网，可先降噪",
+    ),
+    (
+        READING_XDOG,
+        "XDoG 线稿",
+        "Kazuhito00 的 XDoG 软阈值：细线保留最好（头发、装备细节），"
+        "六个参数都可调，适合细节多的立绘",
+    ),
+    (
+        READING_RIDGE,
+        "脊线线稿",
+        "多尺度脊线检测（Meijering）：找「暗线条的中轴」，出粗而连续的线，"
+        "墨量由阈值百分位决定（按有响应的像素排名）",
+    ),
+)
+
+
+#: The 超分 choices: ``(factor, label, hint)``. Factor 1 means "off".
+#:
+#: The factor doubles as the option's key, because that is all the pipeline
+#: needs -- the panel's job is only to map the label back to it.
+UPSCALE_OPTIONS: tuple[tuple[int, str, str], ...] = (
+    (1, "关", "不放大，按源图处理"),
+    (
+        2,
+        "Anime4K ×2",
+        "动漫线条向的放大算法（非 AI、纯本地，MIT）；长边 2048 以内可用。\n"
+        "实测 512 px 图约 4.4 秒，只算一次",
+    ),
+    (
+        4,
+        "Anime4K ×4",
+        "同样的算法做两次 ×2；长边 1024 以内可用，耗时数倍于 ×2",
     ),
 )
 
@@ -2442,13 +2478,115 @@ class PreviewPanel(FloatingPanel):
         self._on_scale(self.view._scale)
 
 
+def preprocess_source(
+    bgr: np.ndarray,
+    alpha: np.ndarray | None,
+    factor: int = 1,
+    filter_name: str = NO_FILTER,
+):
+    """Apply 超分 then 滤镜 to a source picture; returns ``(bgr, alpha, note)``.
+
+    The order is the one the 线稿工坊 workspace used -- the upscaler runs at
+    import, the filters act on the picture it produced -- and the result is a
+    **raster** picture either way, which is exactly why these two sit *before*
+    the line-art reading rather than replacing it: Anime4K's output was checked
+    and carries no vector data at all, so the reading still has to run.
+
+    ``alpha`` is rescaled with nearest-neighbour so the cut-out mask the
+    silhouette and subject steps read still lines up with the colours; it is
+    never upscaled with interpolation, which would invent half-transparent
+    pixels along the boundary.
+
+    A factor whose input-side limit the picture exceeds is **skipped with a
+    note** rather than refused: the limit is a time budget, not a correctness
+    one, and the workspace reported it the same way.
+    """
+    notes: list[str] = []
+    if factor and factor > 1:
+        from pcbart.upscale import max_input_long_side, upscale
+
+        longest = max(bgr.shape[:2])
+        limit = max_input_long_side(factor)
+        if longest > limit:
+            notes.append(f"超分跳过：长边 {longest}px 超出 ×{factor} 的上限 {limit}px")
+        else:
+            bgr = upscale(bgr, int(factor))
+            if alpha is not None:
+                alpha = cv2.resize(
+                    alpha,
+                    (bgr.shape[1], bgr.shape[0]),
+                    interpolation=cv2.INTER_NEAREST,
+                )
+    if filter_name and filter_name != NO_FILTER:
+        from pcbart.java_filters import apply_filter
+
+        bgr = apply_filter(bgr, filter_name)
+    return bgr, alpha, "；".join(notes)
+
+
+#: Pre-step workers that are still running. Held module-level so
+#: :func:`main` can wait for them after the event loop stops -- a QThread
+#: destroyed while running aborts the process, and an Anime4K run cannot be
+#: cancelled once it is inside numpy.
+_running_preprocess_workers: set = set()
+
+
+def _disconnect_worker(worker) -> None:
+    """Stop delivering a pre-step result to a panel that no longer exists.
+
+    Connected to the panel's ``destroyed`` signal, so a panel torn down while
+    its worker is mid-run leaves the worker to finish harmlessly -- its result
+    is dropped instead of being written into deleted widgets.
+    """
+    try:
+        worker.done.disconnect()
+    except (RuntimeError, TypeError):  # never connected, or already gone
+        pass
+
+
+class _PreprocessWorker(QThread):
+    """Runs 超分 + 滤镜 off the UI thread.
+
+    Both steps cost seconds -- Anime4K ×2 measured 4.4 s on a 512 px picture
+    and 17 s on a 1024 px one; a Java filter call 0.4–0.6 s plus JVM start --
+    so running them inline would freeze the window for the duration. The
+    workspace put its upscaler on a background thread for the same reason.
+
+    The result is tagged with the key it was computed for; the panel matches it
+    against the current controls and drops anything stale, because numpy work
+    cannot be cancelled mid-flight. Nothing here touches widgets.
+    """
+
+    done = Signal(object, object, object, str)
+
+    def __init__(self, bgr, alpha, factor: int, filter_name: str, key, parent=None):
+        super().__init__(parent)
+        self._bgr = bgr
+        self._alpha = alpha
+        self._factor = int(factor)
+        self._filter_name = str(filter_name)
+        self._key = key
+        _running_preprocess_workers.add(self)
+        self.finished.connect(lambda: _running_preprocess_workers.discard(self))
+
+    def run(self) -> None:  # noqa: D102 - QThread entry point
+        try:
+            bgr, alpha, note = preprocess_source(
+                self._bgr, self._alpha, self._factor, self._filter_name
+            )
+        except Exception as exc:  # noqa: BLE001 - reported to the panel
+            self.done.emit(self._key, None, None, str(exc))
+            return
+        self.done.emit(self._key, bgr, alpha, note)
+
+
 class PreprocessPanel(FloatingPanel):
     """Image preprocessing as a panel floating inside the main window.
 
-    Only the colour-style rule is live: choosing the colour style pins the
-    artwork to a silkscreen layer and disables the other combinations. Every
-    other control is a placeholder, as is the denoise section, which waits for
-    the PCB_lightgraph integration.
+    Uploading only produces a preview; 导入图片 at the bottom commits it as
+    board geometry. Between those two the panel runs the picture through, in
+    order: 超分 and 滤镜 (picture-level, computed once per source in a worker
+    and cached), 降噪, the selected 读法, and then the 线稿修整 steps.
     """
 
     def __init__(self, parent: QWidget) -> None:
@@ -2461,6 +2599,26 @@ class PreprocessPanel(FloatingPanel):
         self._source_alpha: np.ndarray | None = None
         self._source_path: str | None = None
         self._source_size: tuple[int, int] | None = None
+
+        # The picture as decoded, before 超分 and 滤镜. ``_source_bgr`` above is
+        # what the whole pipeline reads, and those two steps rewrite it -- see
+        # :meth:`_rebuild_source` for why they live at this level rather than
+        # inside ``_process``.
+        self._raw_bgr: np.ndarray | None = None
+        self._raw_alpha: np.ndarray | None = None
+        self._source_revision: int = 0
+        """Bumped on every upload; keeps a previous picture's pre-step results
+        out of the current one's cache."""
+        self._prepared_key: tuple = ()
+        """``(revision, upscale factor, filter name)`` that ``_source_bgr``
+        currently holds the result of."""
+        self._prepared_result: tuple | None = None
+        """``(bgr, alpha)`` of the last successful pre-step run, so switching
+        back to a setting already computed is instant."""
+        self._prepare_worker = None
+        """The running :class:`_PreprocessWorker`, if any. Results are matched
+        against :meth:`_prestep_key` rather than trusted on arrival: the worker
+        cannot be cancelled mid-numpy, so a stale result must be dropped."""
         self._preview_panel: PreviewPanel | None = None
         self._inline_processed: np.ndarray | None = None
         self._full_processed: np.ndarray | None = None
@@ -2693,6 +2851,124 @@ class PreprocessPanel(FloatingPanel):
         )
         tune_layout.addWidget(self.outline_density_row)
 
+        # ---- XDoG 线稿 (Kazuhito00). The upstream's five parameters plus the
+        # level that turns its *soft* response into this pipeline's strict
+        # two-tone mask. Defaults and ranges are the upstream's own, via the
+        # 线稿工坊 workspace's panel; sliders carry integers, so each divisor
+        # below is that parameter's step size inverted.
+        self.xdog_sigma_slider = NoWheelSlider(Qt.Horizontal)
+        self.xdog_sigma_slider.setRange(10, 2000)
+        self.xdog_sigma_slider.setValue(140)
+        self.xdog_sigma_slider.setSingleStep(5)
+        self.xdog_sigma_slider.valueChanged.connect(self._on_tuning_changed)
+        self.xdog_sigma_row = row(
+            "尺度 σ",
+            self.xdog_sigma_slider,
+            "线条尺度：小=只留细线，大=连粗轮廓一起描；按 1000px 长边的像素数计",
+        )
+        tune_layout.addWidget(self.xdog_sigma_row)
+
+        self.xdog_k_slider = NoWheelSlider(Qt.Horizontal)
+        self.xdog_k_slider.setRange(110, 500)
+        self.xdog_k_slider.setValue(160)
+        self.xdog_k_slider.setSingleStep(1)
+        self.xdog_k_slider.valueChanged.connect(self._on_tuning_changed)
+        self.xdog_k_row = row(
+            "σ 比 k", self.xdog_k_slider, "两个模糊半径之比；越大每根线周围的光晕越宽"
+        )
+        tune_layout.addWidget(self.xdog_k_row)
+
+        self.xdog_epsilon_slider = NoWheelSlider(Qt.Horizontal)
+        self.xdog_epsilon_slider.setRange(-100, 100)
+        self.xdog_epsilon_slider.setValue(0)
+        self.xdog_epsilon_slider.setSingleStep(1)
+        self.xdog_epsilon_slider.valueChanged.connect(self._on_tuning_changed)
+        self.xdog_epsilon_row = row(
+            "偏置 ε", self.xdog_epsilon_slider, "软阈值的电平：调低会放过更多弱边"
+        )
+        tune_layout.addWidget(self.xdog_epsilon_row)
+
+        self.xdog_phi_slider = NoWheelSlider(Qt.Horizontal)
+        self.xdog_phi_slider.setRange(1, 500)
+        self.xdog_phi_slider.setValue(100)
+        self.xdog_phi_slider.setSingleStep(1)
+        self.xdog_phi_slider.valueChanged.connect(self._on_tuning_changed)
+        self.xdog_phi_row = row(
+            "锐度 φ", self.xdog_phi_slider, "软阈值曲线的陡度：低=铅笔感，高=接近硬切"
+        )
+        tune_layout.addWidget(self.xdog_phi_row)
+
+        self.xdog_gamma_slider = NoWheelSlider(Qt.Horizontal)
+        self.xdog_gamma_slider.setRange(10, 200)
+        self.xdog_gamma_slider.setValue(98)
+        self.xdog_gamma_slider.setSingleStep(1)
+        self.xdog_gamma_slider.valueChanged.connect(self._on_tuning_changed)
+        self.xdog_gamma_row = row(
+            "衰减 γ", self.xdog_gamma_slider, "宽模糊的权重；接近 1 时平色区保持纸白"
+        )
+        tune_layout.addWidget(self.xdog_gamma_row)
+
+        self.xdog_level_slider = NoWheelSlider(Qt.Horizontal)
+        self.xdog_level_slider.setRange(1, 254)
+        self.xdog_level_slider.setValue(128)
+        self.xdog_level_slider.valueChanged.connect(self._on_tuning_changed)
+        self.xdog_level_row = row(
+            "二值阈值",
+            self.xdog_level_slider,
+            "软响应在哪个电平以下算墨：越高墨越多（实测 64→4.4%、128→6.1%、192→7.9%）",
+        )
+        tune_layout.addWidget(self.xdog_level_row)
+
+        # ---- 脊线线稿 (Meijering). The workspace's sliders, same names and
+        # ranges; the two sigmas are counts of pixels at a 1000 px long side.
+        self.ridge_sigma_min_slider = NoWheelSlider(Qt.Horizontal)
+        self.ridge_sigma_min_slider.setRange(5, 50)
+        self.ridge_sigma_min_slider.setValue(10)
+        self.ridge_sigma_min_slider.setSingleStep(5)
+        self.ridge_sigma_min_slider.valueChanged.connect(self._on_tuning_changed)
+        self.ridge_sigma_min_row = row(
+            "σ 最小", self.ridge_sigma_min_slider, "最小尺度：决定能描到多细的线"
+        )
+        tune_layout.addWidget(self.ridge_sigma_min_row)
+
+        self.ridge_sigma_max_slider = NoWheelSlider(Qt.Horizontal)
+        self.ridge_sigma_max_slider.setRange(10, 100)
+        self.ridge_sigma_max_slider.setValue(30)
+        self.ridge_sigma_max_slider.setSingleStep(5)
+        self.ridge_sigma_max_slider.valueChanged.connect(self._on_tuning_changed)
+        self.ridge_sigma_max_row = row(
+            "σ 最大", self.ridge_sigma_max_slider, "最大尺度：决定能认多宽的线"
+        )
+        tune_layout.addWidget(self.ridge_sigma_max_row)
+
+        self.ridge_steps_slider = NoWheelSlider(Qt.Horizontal)
+        self.ridge_steps_slider.setRange(1, 8)
+        self.ridge_steps_slider.setValue(5)
+        self.ridge_steps_slider.valueChanged.connect(self._on_tuning_changed)
+        self.ridge_steps_row = row(
+            "尺度步数", self.ridge_steps_slider, "两个尺度之间取几档；越多越细也越慢"
+        )
+        tune_layout.addWidget(self.ridge_steps_row)
+
+        self.ridge_black_check = QCheckBox("检测暗脊线")
+        self.ridge_black_check.setChecked(True)
+        self.ridge_black_check.setToolTip(
+            "勾选=暗色线条（白底黑线的图）；取消=亮色线条（黑底白线的图）"
+        )
+        self.ridge_black_check.stateChanged.connect(self._on_tuning_changed)
+        tune_layout.addWidget(self.ridge_black_check)
+
+        self.ridge_percentile_slider = NoWheelSlider(Qt.Horizontal)
+        self.ridge_percentile_slider.setRange(0, 100)
+        self.ridge_percentile_slider.setValue(50)
+        self.ridge_percentile_slider.valueChanged.connect(self._on_tuning_changed)
+        self.ridge_percentile_row = row(
+            "阈值百分位",
+            self.ridge_percentile_slider,
+            "在有响应的像素里保留最强的 (100−该值)%：默认 50 = 保留最强的一半（实测约 10% 墨）",
+        )
+        tune_layout.addWidget(self.ridge_percentile_row)
+
         self.tune_note = QLabel()
         self.tune_note.setWordWrap(True)
         muted(self.tune_note)
@@ -2716,32 +2992,84 @@ class PreprocessPanel(FloatingPanel):
 
         layout.addWidget(tune)
 
-        denoise = section("6 · 降噪", compact=True)
-        self.denoise_section = denoise
-        denoise_layout = QVBoxLayout(denoise)
-        denoise_layout.setContentsMargins(0, 0, 0, 0)
-        denoise_layout.setSpacing(3)
+        # 超分 and 滤镜 act on the *picture* — they replace the source before
+        # anything reads it — so they lead this section, in the order they
+        # apply, ahead of 降噪 (which is also a picture-level step: the
+        # checkbox itself says 先于线稿提取).
+        #
+        # ⚠️ **Both are seconds-class and neither runs on the slider path.**
+        # Anime4K ×2 measured 4.4 s on a 512 px picture; a Java filter call
+        # 0.4–0.6 s plus JVM start. They are computed once per source in a
+        # worker thread and cached -- see :meth:`_rebuild_source`.
+        prestep = section("6 · 图像预处理", compact=True)
+        self.prestep_section = prestep
+        prestep_layout = QVBoxLayout(prestep)
+        prestep_layout.setContentsMargins(0, 0, 0, 0)
+        prestep_layout.setSpacing(3)
+
+        self.upscale_combo = combo([label for _factor, label, _hint in UPSCALE_OPTIONS])
+        self.upscale_combo.setToolTip(
+            "线稿处理之前的放大步骤：算法是位图放大（不是矢量），"
+            "放大后的图仍走同一条线稿管线。超出该倍数的尺寸上限时自动跳过。"
+        )
+        self.upscale_combo.currentIndexChanged.connect(self._on_prestep_changed)
+        prestep_layout.addWidget(row("超分", self.upscale_combo))
+
+        self.filter_combo = combo([FILTER_LABELS[name] for name in FILTERS])
+        self.filter_combo.setToolTip(
+            "先改变画面的线条结构再提取线稿（JH Labs 滤镜，需要 Java 8+）。\n"
+            "「无」不启动 Java；滤镜参数为上游默认值。"
+        )
+        self.filter_combo.currentIndexChanged.connect(self._on_prestep_changed)
+        prestep_layout.addWidget(row("滤镜", self.filter_combo))
+
+        # A note of its own rather than sharing 预处理's: this one carries the
+        # *standing* state of the Java dependency (which does not change while
+        # the user works) and the other carries progress and results. Sharing
+        # would make "滤镜不可用" vanish the moment a run reported anything.
+        self.filter_note = QLabel()
+        self.filter_note.setWordWrap(True)
+        muted(self.filter_note)
+        self.filter_note.setVisible(False)
+        prestep_layout.addWidget(self.filter_note)
+
+        self.prestep_note = QLabel()
+        self.prestep_note.setWordWrap(True)
+        muted(self.prestep_note)
+        self.prestep_note.setVisible(False)
+        prestep_layout.addWidget(self.prestep_note)
 
         self.denoise_check = QCheckBox("启用降噪（独立步骤，先于线稿提取）")
         self.denoise_check.setToolTip(
             "干净矢量图用不到，且会软化细节；扫描件与照片建议开启"
         )
         self.denoise_check.stateChanged.connect(self._on_tuning_changed)
-        denoise_layout.addWidget(self.denoise_check)
+        prestep_layout.addWidget(self.denoise_check)
 
         self.denoise_slider = NoWheelSlider(Qt.Horizontal)
         self.denoise_slider.setRange(3, 31)
         self.denoise_slider.setValue(5)
         self.denoise_slider.valueChanged.connect(self._on_tuning_changed)
-        denoise_layout.addWidget(
+        prestep_layout.addWidget(
             row("模糊核", self.denoise_slider, "越大去噪越强，细节损失也越多")
         )
+
+        layout.addWidget(prestep)
+
+        # 线稿修整: the steps that act on the *mask* rather than the picture.
+        # They used to share the 降噪 section, which named only the one step
+        # that does not belong to them.
+        cleanup = section("7 · 线稿修整", compact=True)
+        self.cleanup_section = cleanup
+        cleanup_layout = QVBoxLayout(cleanup)
+        cleanup_layout.setContentsMargins(0, 0, 0, 0)
+        cleanup_layout.setSpacing(3)
 
         self.despeckle_slider = NoWheelSlider(Qt.Horizontal)
         self.despeckle_slider.setRange(0, 60)
         self.despeckle_slider.setValue(0)
         self.despeckle_slider.valueChanged.connect(self._on_tuning_changed)
-        denoise_layout.addWidget(
+        cleanup_layout.addWidget(
             row("去杂点", self.despeckle_slider, "清除小于该像素数的孤立墨点（0=关）")
         )
 
@@ -2773,7 +3101,7 @@ class PreprocessPanel(FloatingPanel):
         self.silhouette_slider.setFixedWidth(110)
         silhouette_layout.addWidget(self.silhouette_slider)
         silhouette_layout.addStretch(1)
-        denoise_layout.addWidget(silhouette_row)
+        cleanup_layout.addWidget(silhouette_row)
 
         # 弧线平滑 is its own switch, separate from every style, because it is
         # the one step whose cost is measured in seconds rather than
@@ -2785,9 +3113,9 @@ class PreprocessPanel(FloatingPanel):
             "这一步要跑几秒，只在需要时打开。"
         )
         self.arc_smooth_check.stateChanged.connect(self._on_tuning_changed)
-        denoise_layout.addWidget(self.arc_smooth_check)
+        cleanup_layout.addWidget(self.arc_smooth_check)
 
-        layout.addWidget(denoise)
+        layout.addWidget(cleanup)
 
         self.board_art_section = self._build_board_art_section()
         layout.addWidget(self.board_art_section)
@@ -2796,7 +3124,7 @@ class PreprocessPanel(FloatingPanel):
         # so it sits outside 线稿调试. It used to live inside that section,
         # which meant picking 板画 hid the only way to open it -- the styles
         # that change the picture most had no way to inspect the result.
-        preview_group = section("8 · 预览", compact=True)
+        preview_group = section("9 · 预览", compact=True)
         self.preview_section = preview_group
         preview_layout_group = QVBoxLayout(preview_group)
         preview_layout_group.setContentsMargins(0, 0, 0, 0)
@@ -2855,7 +3183,7 @@ class PreprocessPanel(FloatingPanel):
         three things it needs is missing: the model folder, or PyTorch, or
         nothing.
         """
-        box = section("9 · 线稿重绘（外接模型）", compact=True)
+        box = section("10 · 线稿重绘（外接模型）", compact=True)
         layout = QVBoxLayout(box)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
@@ -2987,7 +3315,7 @@ class PreprocessPanel(FloatingPanel):
         floats and millimetres, so the widgets carry integers and the
         conversion happens in :meth:`_board_art_params`.
         """
-        box = section("7 · 板画设置", compact=True)
+        box = section("8 · 板画设置", compact=True)
         layout = QVBoxLayout(box)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(3)
@@ -3628,6 +3956,9 @@ class PreprocessPanel(FloatingPanel):
             self._source_alpha,
             self._source_path,
             self._source_size,
+            self._raw_bgr,
+            self._raw_alpha,
+            self._source_revision,
             self._inline_processed,
             self._full_processed,
             self._published_digest,
@@ -3635,8 +3966,16 @@ class PreprocessPanel(FloatingPanel):
             self._import_id,
             self._committed_style,
         )
-        self._source_bgr, self._source_alpha, self._source_path = bgr, alpha, path
+        self._source_path = path
         self._source_size = (bgr.shape[1], bgr.shape[0])
+        # The raw picture is what 超分 and 滤镜 are applied *to*; the pipeline
+        # source below is rebuilt from it, so the settings in force at upload
+        # time are honoured before anything reads the picture.
+        self._raw_bgr, self._raw_alpha = bgr, alpha
+        self._source_revision += 1
+        self._prepared_result = None
+        self._prepared_key = ()
+        self._source_bgr, self._source_alpha = bgr, alpha
         # The cached conversion belongs to the *previous* picture, so it is
         # dropped rather than carried over.
         self._inline_processed = None
@@ -3658,6 +3997,11 @@ class PreprocessPanel(FloatingPanel):
         self._import_id = ""
         self._committed_style = ""
         self._apply_two_tone_default(path, bgr, alpha)
+        # 超分 / 滤镜 in force are applied now, before anything reads the
+        # picture; with both at their defaults this adopts the raw picture and
+        # costs nothing. ``refresh=False`` because the preview is computed once
+        # below, for whichever source the rebuild settled on.
+        self._rebuild_source(refresh=False)
         try:
             self._refresh_preview()
         except Exception as exc:  # noqa: BLE001 - report and roll back
@@ -3669,6 +4013,9 @@ class PreprocessPanel(FloatingPanel):
                 self._source_alpha,
                 self._source_path,
                 self._source_size,
+                self._raw_bgr,
+                self._raw_alpha,
+                self._source_revision,
                 self._inline_processed,
                 self._full_processed,
                 self._published_digest,
@@ -3689,7 +4036,9 @@ class PreprocessPanel(FloatingPanel):
         )
         self.source_note.setText(self._source_description)
         tone(self.source_note, "success")
-        self.import_button.setEnabled(True)
+        # A pre-step run started by the rebuild keeps the button off until it
+        # lands: importing in between would commit the un-prestepped picture.
+        self.import_button.setEnabled(not self._prestep_busy())
         self.import_button.setToolTip("按所选图层导入当前线稿")
         note_text(self.import_note, "")
         self._refresh_board_note()
@@ -3862,6 +4211,9 @@ class PreprocessPanel(FloatingPanel):
         changing a single pixel. That is the exact defect this panel has been
         reported for before -- a control that looks live and does nothing --
         so they are hidden instead of merely documented.
+
+        The same rule covers the two readings added later: XDoG's six controls
+        and the ridge filter's five belong to their own readings only.
         """
         reading = self._reading()
         for widget in (
@@ -3872,6 +4224,23 @@ class PreprocessPanel(FloatingPanel):
             widget.setVisible(reading == READING_OUTLINE)
         for widget in (self.strength_row, self.threshold_row):
             widget.setVisible(reading == READING_DODGE)
+        for widget in (
+            self.xdog_sigma_row,
+            self.xdog_k_row,
+            self.xdog_epsilon_row,
+            self.xdog_phi_row,
+            self.xdog_gamma_row,
+            self.xdog_level_row,
+        ):
+            widget.setVisible(reading == READING_XDOG)
+        for widget in (
+            self.ridge_sigma_min_row,
+            self.ridge_sigma_max_row,
+            self.ridge_steps_row,
+            self.ridge_black_check,
+            self.ridge_percentile_row,
+        ):
+            widget.setVisible(reading == READING_RIDGE)
 
     def _lineart_params(self, param_scale: float = 1.0):
         """Line-extraction settings only.
@@ -3880,7 +4249,10 @@ class PreprocessPanel(FloatingPanel):
         two are applied in sequence in :meth:`_process`.
 
         ``param_scale`` carries the pixel-measured 轮廓宽度 across a reduction;
-        粗细 and 阈值 are ratios and do not need it.
+        粗细 and 阈值 are ratios and do not need it. The XDoG and ridge scales
+        are neither: they are counts of pixels *at a 1000 px long side* and the
+        model multiplies them by the picture's own long side, so they survive a
+        reduction by construction (see ``READING_REFERENCE_LONG_SIDE``).
         """
         from pcbart.lineart import LineArtParams
         from pcbart.work_scale import scaled_param
@@ -3907,6 +4279,21 @@ class PreprocessPanel(FloatingPanel):
             outline_sigma_ratio=self.outline_detail_slider.value() / 10000.0,
             outline_density=self.outline_density_slider.value() / 1000.0,
             outline_width_mm=self.outline_width_slider.value() / 100.0,
+            # XDoG: the upstream's five parameters plus the binarisation level.
+            # Each slider carries an integer scaled by that parameter's step
+            # size in the workspace's panel, so the divisors are load-bearing.
+            xdog_sigma=self.xdog_sigma_slider.value() / 100.0,
+            xdog_k=self.xdog_k_slider.value() / 100.0,
+            xdog_epsilon=self.xdog_epsilon_slider.value() / 100.0,
+            xdog_phi=self.xdog_phi_slider.value() / 10.0,
+            xdog_gamma=self.xdog_gamma_slider.value() / 100.0,
+            xdog_level=self.xdog_level_slider.value(),
+            # 脊线: the workspace's own sliders.
+            ridge_sigma_min=self.ridge_sigma_min_slider.value() / 10.0,
+            ridge_sigma_max=self.ridge_sigma_max_slider.value() / 10.0,
+            ridge_steps=self.ridge_steps_slider.value(),
+            ridge_black=self.ridge_black_check.isChecked(),
+            ridge_percentile=float(self.ridge_percentile_slider.value()),
         )
 
     def _px_per_mm(self, image) -> float | None:
@@ -4220,6 +4607,18 @@ class PreprocessPanel(FloatingPanel):
                 reading_state += (
                     f"粗细 {self.strength_slider.value() / 100:.2f}　·　"
                     f"阈值 {self.threshold_slider.value() / 100:.2f}　·　"
+                )
+            elif self._reading() == READING_XDOG:
+                reading_state += (
+                    f"σ {self.xdog_sigma_slider.value() / 100:.2f}　·　"
+                    f"φ {self.xdog_phi_slider.value() / 10:.1f}　·　"
+                    f"阈值 {self.xdog_level_slider.value()}　·　"
+                )
+            elif self._reading() == READING_RIDGE:
+                reading_state += (
+                    f"尺度 {self.ridge_sigma_min_slider.value() / 10:.1f}"
+                    f"–{self.ridge_sigma_max_slider.value() / 10:.1f}　·　"
+                    f"百分位 {self.ridge_percentile_slider.value()}　·　"
                 )
 
             self.tune_note.setText(
@@ -4558,6 +4957,163 @@ class PreprocessPanel(FloatingPanel):
             self._preview_timer = timer
         timer.start()
 
+    # -------------------------------------------------------- 图像预处理 steps
+
+    def _upscale_factor(self) -> int:
+        """The chosen 超分 factor; 1 means off."""
+        index = self.upscale_combo.currentIndex()
+        if 0 <= index < len(UPSCALE_OPTIONS):
+            return int(UPSCALE_OPTIONS[index][0])
+        return 1
+
+    def _filter_name(self) -> str:
+        """The chosen 滤镜 name; ``null`` means pass the picture through."""
+        index = self.filter_combo.currentIndex()
+        if 0 <= index < len(FILTERS):
+            return FILTERS[index]
+        return NO_FILTER
+
+    def _prestep_key(self) -> tuple:
+        """What the current ``_source_bgr`` was built for.
+
+        The revision is part of it so a result computed for the previous upload
+        can never be adopted by the new one, even if the settings match.
+        """
+        return (self._source_revision, self._upscale_factor(), self._filter_name())
+
+    def _on_prestep_changed(self) -> None:
+        """超分 or 滤镜 moved: rebuild the picture the pipeline reads."""
+        self._rebuild_source()
+
+    def _rebuild_source(self, *, refresh: bool = True) -> None:
+        """Make ``_source_bgr``/``_source_alpha`` match 超分 + 滤镜.
+
+        ⚠️ **These two live here rather than inside** :meth:`_process` because
+        they cost seconds: running them on the slider path would bring back the
+        调参卡顿 the panel was fixed for. The pipelines that read the source --
+        the preview, the import, the settled full-resolution publish -- all go
+        through ``_source_bgr``, so doing it once at this level covers them.
+        """
+        if self._raw_bgr is None:
+            return
+        key = self._prestep_key()
+        if key == self._prepared_key:
+            return
+
+        # Already computed for this exact setting? Adopt it without a JVM or a
+        # second upscale -- flipping the combo back and forth is common.
+        if self._prepared_result is not None and self._prepared_result[0] == key:
+            self._adopt_prepared(*self._prepared_result[1:], refresh=refresh)
+            return
+
+        factor = self._upscale_factor()
+        name = self._filter_name()
+        if factor == 1 and name == NO_FILTER:
+            # Nothing to do: the raw picture *is* the pipeline source. Cheap and
+            # synchronous, which is what keeps the default state instant.
+            self._adopt_prepared(self._raw_bgr, self._raw_alpha, refresh=refresh)
+            return
+
+        worker = self._prepare_worker
+        if worker is not None and worker.isRunning():
+            # One run at a time: numpy cannot be cancelled, and a second worker
+            # would compute the abandoned setting twice over. When the running
+            # one lands, _on_prepared sees a stale key and starts this one.
+            note_text(self.prestep_note, "预处理中…")
+            tone(self.prestep_note, "warning")
+            return
+
+        note_text(self.prestep_note, "预处理中（超分 / 滤镜可能要几秒）…")
+        tone(self.prestep_note, "warning")
+        # ⚠️ Importing while a pre-step runs would commit the *un-prestepped*
+        # picture, which looks like the setting silently not applying.
+        self.import_button.setEnabled(False)
+        # ⚠️ **Not parented to this panel.** A ``QThread`` destroyed while
+        # running aborts the process (``qFatal``), and the panel can be
+        # destroyed -- window closed, project switched -- while a thirty-second
+        # upscale is still inside numpy, which cannot be interrupted. The
+        # application owns the thread instead, the module-level registry keeps
+        # it alive, and if this panel dies first the result is simply never
+        # delivered.
+        worker = _PreprocessWorker(self._raw_bgr, self._raw_alpha, factor, name, key)
+        application = QApplication.instance()
+        if application is not None:
+            worker.setParent(application)
+        worker.done.connect(self._on_prepared)
+        self.destroyed.connect(lambda *_: _disconnect_worker(worker))
+        self._prepare_worker = worker
+        worker.start()
+
+    def _adopt_prepared(self, bgr, alpha, *, refresh: bool = True) -> None:
+        """Take a finished pre-step result as the pipeline source."""
+        self._source_bgr = bgr
+        self._source_alpha = alpha
+        self._prepared_key = self._prestep_key()
+        note_text(self.prestep_note, "")
+        self.import_button.setEnabled(self._source_path is not None)
+        self.import_button.setToolTip("按所选图层导入当前线稿")
+        from pcbart.lineart import TraceCache
+
+        # The cached picture-derived results belong to the previous picture's
+        # bytes, but the cache is keyed on those bytes -- a fresh object makes
+        # the invalidation explicit rather than relying on the hash mismatch.
+        self._trace_cache = TraceCache()
+        self._published_digest = None
+        if refresh:
+            self._refresh_preview()
+            self._repaint_now()
+
+    def _on_prepared(self, key, bgr, alpha, message: str) -> None:
+        """A pre-step run landed, on the main thread.
+
+        ``message`` carries both the "skipped, over the size limit" note and
+        outright failures. A failure keeps the previous source rather than
+        silently dropping to an un-prestepped picture, and the key is still
+        recorded so the rebuild does not retry in a loop.
+        """
+        if bgr is None:
+            self._prepared_key = key
+            note_text(self.prestep_note, message or "预处理失败")
+            tone(self.prestep_note, "danger")
+            return
+        self._prepared_result = (key, bgr, alpha)
+        if key != self._prestep_key():
+            # The controls moved while this ran; keep the result (a switch back
+            # wants it) and compute what they ask for now.
+            self._rebuild_source()
+            return
+        self._adopt_prepared(bgr, alpha)
+        if message:
+            note_text(self.prestep_note, message)
+            tone(self.prestep_note, "warning")
+
+    def _prestep_busy(self) -> bool:
+        worker = self._prepare_worker
+        try:
+            return worker is not None and worker.isRunning()
+        except RuntimeError:  # the worker was deleted with the panel
+            return False
+
+    def _refresh_filter_availability(self) -> None:
+        """Enable 滤镜 only where picking one can actually work.
+
+        Java is an external dependency (see :mod:`pcbart.java_filters`), and a
+        machine without it should still learn *why* the picker is dead -- so the
+        row stays visible with the reason attached instead of vanishing. The
+        check runs on every style switch, so installing Java later and coming
+        back is enough; it is deliberately cheap (no compile attempt -- that
+        happens when a filter is actually applied).
+        """
+        from pcbart.java_filters import availability
+
+        usable, reason = availability()
+        self.filter_combo.setEnabled(usable)
+        note_text(self.filter_note, "" if usable else f"滤镜不可用：{reason}")
+        if not usable:
+            tone(self.filter_note, "warning")
+            if self._filter_name() != NO_FILTER:
+                self.filter_combo.setCurrentIndex(0)
+
     def _reset_tuning(self) -> None:
         """Restore every style's defaults, including the ones not on screen.
 
@@ -4577,6 +5133,16 @@ class PreprocessPanel(FloatingPanel):
             self.tone_slider,
             self.outline_mm_slider,
             self.min_feature_slider,
+            self.xdog_sigma_slider,
+            self.xdog_k_slider,
+            self.xdog_epsilon_slider,
+            self.xdog_phi_slider,
+            self.xdog_gamma_slider,
+            self.xdog_level_slider,
+            self.ridge_sigma_min_slider,
+            self.ridge_sigma_max_slider,
+            self.ridge_steps_slider,
+            self.ridge_percentile_slider,
         )
         for widget in widgets:
             widget.blockSignals(True)
@@ -4591,6 +5157,16 @@ class PreprocessPanel(FloatingPanel):
         self.tone_slider.setValue(int(TONE_THRESHOLD * 100))
         self.outline_mm_slider.setValue(46)
         self.min_feature_slider.setValue(10)
+        self.xdog_sigma_slider.setValue(140)
+        self.xdog_k_slider.setValue(160)
+        self.xdog_epsilon_slider.setValue(0)
+        self.xdog_phi_slider.setValue(100)
+        self.xdog_gamma_slider.setValue(98)
+        self.xdog_level_slider.setValue(128)
+        self.ridge_sigma_min_slider.setValue(10)
+        self.ridge_sigma_max_slider.setValue(30)
+        self.ridge_steps_slider.setValue(5)
+        self.ridge_percentile_slider.setValue(50)
         for widget in widgets:
             widget.blockSignals(False)
 
@@ -4602,6 +5178,7 @@ class PreprocessPanel(FloatingPanel):
             (self.flip_vertical_check, False),
             (self.flip_horizontal_check, False),
             (self.invert_check, False),
+            (self.ridge_black_check, True),
         ):
             check.blockSignals(True)
             check.setChecked(value)
@@ -4611,6 +5188,16 @@ class PreprocessPanel(FloatingPanel):
         self.reading_combo.setCurrentIndex(0)
         self.reading_combo.blockSignals(False)
         self._refresh_reading_rows()
+
+        # 超分 and 滤镜 back to 关 / 无. Signals are blocked like every other
+        # control here, so the source is rebuilt once below instead of twice.
+        self.upscale_combo.blockSignals(True)
+        self.upscale_combo.setCurrentIndex(0)
+        self.upscale_combo.blockSignals(False)
+        self.filter_combo.blockSignals(True)
+        self.filter_combo.setCurrentIndex(0)
+        self.filter_combo.blockSignals(False)
+        self._rebuild_source(refresh=False)
 
         self._refresh_preview()
         self._repaint_now()
@@ -4637,7 +5224,8 @@ class PreprocessPanel(FloatingPanel):
                 self.layer_group,
                 self.board_art_section,
                 self.tuning_section,
-                self.denoise_section,
+                self.prestep_section,
+                self.cleanup_section,
                 self.preview_section,
                 self.redraw_section,
             ):
@@ -4658,7 +5246,8 @@ class PreprocessPanel(FloatingPanel):
         # conversion to inspect.
         self.board_art_section.setVisible(painting)
         self.tuning_section.setVisible(not painting and not locked)
-        self.denoise_section.setVisible(not painting and not locked)
+        self.prestep_section.setVisible(not painting and not locked)
+        self.cleanup_section.setVisible(not painting and not locked)
         self.preview_section.setVisible(not locked)
 
         # 线稿重绘 is the third way to turn a picture into line art, so it
@@ -4675,6 +5264,9 @@ class PreprocessPanel(FloatingPanel):
             # style change is a common way to arrive at this panel -- so the
             # rows are reconciled here rather than only when the combo moves.
             self._refresh_reading_rows()
+            # Java can have been installed since the panel was built; the same
+            # "a stale status is a lie" rule as 线稿重绘 above.
+            self._refresh_filter_availability()
 
         # 板画 replaces the layer list with its own three-way choice. The
         # side control above is *not* used then: "both" is a side choice of its
@@ -11007,7 +11599,22 @@ def main() -> int:
         QTimer.singleShot(
             5000, lambda: start_update_check(window, manual=False)
         )
-    return app.exec()
+    code = app.exec()
+    # ⚠️ **A running QThread destroyed with the application aborts the
+    # process.** The pre-step workers are the one place that can still be
+    # mid-flight when the user closes the window (a 2048 px Anime4K run takes
+    # tens of seconds, and numpy cannot be interrupted), so they are given a
+    # moment here -- after the event loop has stopped, before Python tears the
+    # objects down. Five seconds covers the common "it finished while the
+    # window was closing" case; a genuinely long run still gets its thread
+    # pulled away, which is the pre-existing exposure the update workers have.
+    for worker in list(_running_preprocess_workers):
+        try:
+            worker.wait(5000)
+        except RuntimeError:  # already gone with its panel
+            pass
+    _running_preprocess_workers.clear()
+    return code
 
 
 if __name__ == "__main__":

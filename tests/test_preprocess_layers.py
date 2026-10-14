@@ -518,22 +518,129 @@ def test_switching_readings_swaps_which_controls_are_live(loaded):
     assert loaded.outline_density_row.isHidden()
 
 
-def test_the_dodge_reading_stays_last_so_the_default_cannot_move(loaded):
+def test_the_new_readings_show_only_their_own_controls(loaded):
+    """XDoG's six and the ridge filter's five belong to their own readings.
+
+    Same rule as the dodge sliders above: a control the current reading ignores
+    must be hidden, not left looking live. The two new readings are checked in
+    both directions -- their own rows appear, and none of the older readings'
+    rows stay on screen beside them.
+    """
+    from gui_mockup import READING_RIDGE, READING_XDOG, READING_OPTIONS
+
+    order = [key for key, _label, _hint in READING_OPTIONS]
+
+    xdog_rows = (
+        loaded.xdog_sigma_row,
+        loaded.xdog_k_row,
+        loaded.xdog_epsilon_row,
+        loaded.xdog_phi_row,
+        loaded.xdog_gamma_row,
+        loaded.xdog_level_row,
+    )
+    ridge_rows = (
+        loaded.ridge_sigma_min_row,
+        loaded.ridge_sigma_max_row,
+        loaded.ridge_steps_row,
+        loaded.ridge_black_check,
+        loaded.ridge_percentile_row,
+    )
+
+    loaded.reading_combo.setCurrentIndex(order.index(READING_XDOG))
+    for widget in xdog_rows:
+        assert not widget.isHidden()
+    for widget in ridge_rows + (loaded.strength_row, loaded.outline_width_row):
+        assert widget.isHidden()
+
+    loaded.reading_combo.setCurrentIndex(order.index(READING_RIDGE))
+    for widget in ridge_rows:
+        assert not widget.isHidden()
+    for widget in xdog_rows + (loaded.strength_row, loaded.outline_density_row):
+        assert widget.isHidden()
+
+    loaded.reading_combo.setCurrentIndex(order.index("fill"))
+    for widget in xdog_rows + ridge_rows:
+        assert widget.isHidden()
+
+
+def test_the_new_reading_sliders_reach_the_model_with_their_scales(loaded):
+    """Every divisor here is a promise about what the slider's number means.
+
+    The XDoG and ridge parameters are the workspace panel's, whose sliders
+    carried integers; this panel keeps that convention (Qt sliders are ints)
+    and converts on the way to the model. Getting a divisor wrong scales the
+    parameter silently -- the kind of error that reads as "the filter is just
+    weak" rather than as a bug -- so each value is asserted at the model.
+    """
+    from gui_mockup import READING_RIDGE, READING_XDOG, READING_OPTIONS
+
+    order = [key for key, _label, _hint in READING_OPTIONS]
+
+    loaded.reading_combo.setCurrentIndex(order.index(READING_XDOG))
+    loaded.xdog_sigma_slider.setValue(250)      # 2.50
+    loaded.xdog_k_slider.setValue(220)          # 2.20
+    loaded.xdog_epsilon_slider.setValue(-30)    # -0.30
+    loaded.xdog_phi_slider.setValue(45)         # 4.5
+    loaded.xdog_gamma_slider.setValue(75)       # 0.75
+    loaded.xdog_level_slider.setValue(200)
+    params = loaded._lineart_params()
+    assert params.mode == READING_XDOG
+    assert (
+        params.xdog_sigma,
+        params.xdog_k,
+        params.xdog_epsilon,
+        params.xdog_phi,
+        params.xdog_gamma,
+        params.xdog_level,
+    ) == (2.5, 2.2, -0.3, 4.5, 0.75, 200)
+
+    loaded.reading_combo.setCurrentIndex(order.index(READING_RIDGE))
+    loaded.ridge_sigma_min_slider.setValue(25)   # 2.5
+    loaded.ridge_sigma_max_slider.setValue(80)   # 8.0
+    loaded.ridge_steps_slider.setValue(3)
+    loaded.ridge_black_check.setChecked(False)
+    loaded.ridge_percentile_slider.setValue(40)
+    params = loaded._lineart_params()
+    assert params.mode == READING_RIDGE
+    assert (
+        params.ridge_sigma_min,
+        params.ridge_sigma_max,
+        params.ridge_steps,
+        params.ridge_black,
+        params.ridge_percentile,
+    ) == (2.5, 8.0, 3, False, 40.0)
+
+
+def test_the_default_reading_cannot_move_and_new_ones_are_appended(loaded):
     """⚠️ ``_reset_tuning`` returns to index 0, so ordering is a promise.
 
     Inserting a new reading above 填充色块 would silently change what every
     fresh import does, and the reset button would land on something else. The
     keys are checked rather than the labels so a reworded label cannot hide a
     reordered option.
+
+    ⚠️ **The rule used to read "dodge is last".** That was a proxy for "new
+    readings are appended, never inserted", and it broke when XDoG and 脊线
+    were appended after dodge -- which is the append the rule is meant to
+    allow. The invariant is now stated directly: the default stays at index 0,
+    and the three original readings keep their relative order.
     """
-    from gui_mockup import READING_DODGE, READING_FILL, READING_OPTIONS
+    from gui_mockup import (
+        READING_DODGE,
+        READING_FILL,
+        READING_OPTIONS,
+        READING_OUTLINE,
+    )
 
     order = [key for key, _label, _hint in READING_OPTIONS]
 
     assert order[0] == READING_FILL
-    assert order[-1] == READING_DODGE
     assert len(order) == len(set(order)), "duplicate reading keys"
     assert loaded.reading_combo.currentIndex() == 0
+    # The originals in their original relative order, ahead of anything added
+    # later. Appending is allowed; inserting is what must not happen.
+    positions = [order.index(key) for key in (READING_FILL, READING_OUTLINE, READING_DODGE)]
+    assert positions == sorted(positions)
 
 
 def test_the_ink_threshold_reaches_the_model_in_the_dodge_reading(loaded):

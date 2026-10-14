@@ -24,13 +24,24 @@
 
 | 风格 | 说明 |
 |---|---|
-| 线稿 | 三种读法：填充色块、描边 + 填充、纯线条。深浅区域直接映射为黑白 |
+| 线稿 | 五种读法：填充色块、描边 + 填充、纯线条、XDoG 线稿、脊线线稿。深浅区域直接映射为黑白 |
 | 板画 | 双色块面，浅色区域白、深色区域黑，外轮廓用白线勾出。明暗分界、轮廓宽度、最小特征、翻转、反相均可调 |
 | 彩色丝印 | 保留原图配色，不做线稿转换 |
 
 支持 PNG、JPG 等常见格式与透明底图片，中文路径可用。图片最长边默认
 76.2 mm，可调整。降噪是独立步骤，可与线稿分开调整。预览随参数更新，
 大图预览按全分辨率重算。
+
+五种读法各有适用范围：填充色块适合纯色线稿；描边 + 填充保留明暗过渡里的
+细节；纯线条不把深色区域涂成黑块；XDoG 线稿的细线保留最好；脊线线稿出粗而
+连续的线条。各自的参数都在【5 · 线稿调试】里，只在使用该读法时出现。
+
+线稿处理前还有两个可选步骤，在【6 · 图像预处理】里：
+
+| 步骤 | 说明 |
+|---|---|
+| 超分 | Anime4K ×2 / ×4 位图放大，用于低分辨率图片。输入超过该倍数的尺寸上限时跳过并提示 |
+| 滤镜 | 16 种 JH Labs 滤镜（印章、骨架、轮廓、高斯差、阈值、浮雕等）与「无」。「无」不启动 Java |
 
 ### 板框
 
@@ -190,6 +201,8 @@ run.bat calibrate "路径\到\工程.epro2"           :: 分析工程，定标�
 - 铜层目前只支持填充风格，走线风格尚未实现
 - 形状下拉中的「套用模板」为通用模板功能，暂未开放（通行证模板不受影响）
 - 线稿重绘工作区是独立工具 `tools\line_redraw_panel.py`，未并入主窗口
+- 【滤镜】需要机器上装有 Java（JRE 8+），其余功能不依赖 Java
+- 【超分】按整图计算，1024 px 图片 ×2 约 17 秒，只算一次；画面停止变化后才输出结果
 - 安装包未做代码签名
 
 ---
@@ -200,6 +213,7 @@ run.bat calibrate "路径\到\工程.epro2"           :: 分析工程，定标�
 |---|---|
 | Python | 3.11 / 3.12（`run.bat` 会自动查找） |
 | 依赖 | PySide6、numpy、opencv-python-headless、shapely、Pillow、pytest |
+| Java | JRE 8+（仅【滤镜】需要，可选） |
 | Node.js | 24（仅独立校验器使用，运行软件不需要） |
 
 ---
@@ -223,7 +237,10 @@ pcbart/                 核心库（纯 Python，不依赖 Qt）
   templates.py          工程骨架记录
   image_prep.py         图像去噪、二值化、极性判定、主体掩膜
   image_size.py         像素尺寸读取（不依赖 Qt）
-  lineart.py            线稿转换（填充色块 / 描边+填充 / 纯线条）
+  lineart.py            线稿转换（填充色块 / 描边+填充 / 纯线条 / XDoG / 脊线）
+  ridge.py              Meijering 脊线滤波（scikit-image 的复刻，无新依赖）
+  upscale.py            超分预处理 Anime4K ×2 / ×4（位图，非矢量）
+  java_filters.py       滤镜模块的 Java 桥（子进程调用 java_lineart/）
   denoise.py            降噪（移植自 PCB_lightgraph，MIT）
   boardart.py           板画风格：双色块面 + 内缩白轮廓
   outline.py            轮廓提取、简化、轴向吸附、圆识别、工艺补偿
@@ -270,6 +287,11 @@ pcbart/                 核心库（纯 Python，不依赖 Qt）
   model_paths.py        外接重绘模型路径的四级解析
   models/face.onnx      YuNet 人脸模型（随包分发）
 
+java_lineart/           随包分发的 Java 滤镜小工具（见 docs/THIRD_PARTY.md）
+  src/                  包装代码（本项目自写）
+  lib/                  JH Labs Filters（Apache-2.0）+ 许可全文
+  classes/              预编译的 .class（--release 8，装 JRE 即可）
+
 tools/                  命令行工具与界面
   gui_mockup.py         桌面应用主体
   design_canvas.py      画布交互（选中 / 拖动 / 缩放 / 平移 / 取景）
@@ -282,7 +304,7 @@ tools/                  命令行工具与界面
   acceptance_check.py   端到端验收
   simulate_ui.py        渲染多种界面状态到 PNG
 docs/                   调研结论与验证清单
-tests/                  1723 项测试
+tests/                  1840 项测试
 out/                    生成的样本与缓存（已 gitignore）
 ```
 
