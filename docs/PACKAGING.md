@@ -8,7 +8,7 @@
 
 ## 本轮打包状态（2026-11-07）
 
-1.0.6 内测候选为 `out/2026.11.7test/release-1.0.6/package/EzPCBArtTool_v1.0.6_安装包.exe`，
+1.0.6 内测最终包为 `out/2026.11.7test/release-1.0.6/package/EzPCBArtTool_v1.0.6_安装包.exe`，
 66,842,964 字节，SHA-256 `f1b2607d2dd7f34a4cffaee005c8a19d11dd9ddd42530af8d01752b324022adf`。
 2026-11-07 标准测试 1860 passed / 0 failed / 3 skipped，318.12 秒；Python 3.12.10 / pytest 9.1.1 / PySide6 6.11.2。
 真实全新安装与 1.0.4 覆盖升级、旧草稿保留、素材一致性、界面与导出独立回读均通过。
@@ -89,7 +89,7 @@ EzPCBArtTool.exe --verify-assets --output <本轮日期目录>\installed-assets.
 > - 公测版 → `0.1.0`
 > - 正式版 → `1.0.0`
 
-**当前已发布版本：`1.0.4`；本轮目标版本：`1.0.6`（内测，已验收、待发布）**。源码版本由 `pcbart/__init__.py` 的 `__version__` 决定。
+**当前已发布版本：`1.0.6`（内测，GitHub / CNB / 个人网站已同步）**。源码版本由 `pcbart/__init__.py` 的 `__version__` 决定。
 规则：**打包类型由用户决定，版本号跟着类型走**；`__version__` 只是"现在
 代码是什么版本"，安装包用 `/DAppVersion=` 单独给。
 
