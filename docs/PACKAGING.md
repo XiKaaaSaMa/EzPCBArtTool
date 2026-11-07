@@ -9,7 +9,7 @@
 ## 本轮打包状态（2026-11-07）
 
 1.0.6 内测候选为 `out/2026.11.7test/release-1.0.6/package/EzPCBArtTool_v1.0.6_安装包.exe`，
-66,848,726 字节，SHA-256 `4150a3888bf7f598e63b18e977ad82a029ed4e81800e1aa25926bdeef3342c48`。
+66,842,964 字节，SHA-256 `f1b2607d2dd7f34a4cffaee005c8a19d11dd9ddd42530af8d01752b324022adf`。
 2026-11-07 标准测试 1860 passed / 0 failed / 3 skipped，318.12 秒；Python 3.12.10 / pytest 9.1.1 / PySide6 6.11.2。
 真实全新安装与 1.0.4 覆盖升级、旧草稿保留、素材一致性、界面与导出独立回读均通过。
 日志与本轮报告在 `out/2026.11.7test/release-1.0.6/`，GitHub/CNB/网站同步结果见 `PROGRESS.md` 顶部。
