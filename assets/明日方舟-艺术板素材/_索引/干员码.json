@@ -1,0 +1,120 @@
+{
+  "qr_dir": "20-干员二维码",
+  "barcode_dir": "21-情报编号条形码",
+  "qr_code_mm": 3.1997,
+  "qr_file_mm": 4.418633333333334,
+  "qr_quiet_zone_modules": 4,
+  "barcode_code_mm": 39.245,
+  "barcode_height_mm": 4.941,
+  "barcode_file_mm": 49.180443037974676,
+  "barcode_quiet_zone_modules": 10,
+  "dpi": 600,
+  "operators": 463,
+  "qr_files": 926,
+  "barcodes": 439,
+  "barcode_files": 878,
+  "missing_numbers": [
+    {
+      "page": "Mechanist(卫戍协议)",
+      "name": "Mechanist(卫戍协议)"
+    },
+    {
+      "page": "Misery(卫戍协议)",
+      "name": "Misery(卫戍协议)"
+    },
+    {
+      "page": "Pith(卫戍协议)",
+      "name": "Pith(卫戍协议)"
+    },
+    {
+      "page": "Raidian(卫戍协议)",
+      "name": "Raidian(卫戍协议)"
+    },
+    {
+      "page": "Sharp(卫戍协议)",
+      "name": "Sharp(卫戍协议)"
+    },
+    {
+      "page": "Stormeye(卫戍协议)",
+      "name": "Stormeye(卫戍协议)"
+    },
+    {
+      "page": "Touch(卫戍协议)",
+      "name": "Touch(卫戍协议)"
+    },
+    {
+      "page": "暮落(集成战略)",
+      "name": "暮落"
+    },
+    {
+      "page": "盟约·辅助干员",
+      "name": "盟约·辅助干员"
+    },
+    {
+      "page": "郁金香(卫戍协议)",
+      "name": "郁金香(卫戍协议)"
+    },
+    {
+      "page": "预备干员-先锋(卫戍协议)",
+      "name": "预备干员-先锋(卫戍协议)"
+    },
+    {
+      "page": "预备干员-医疗(卫戍协议)",
+      "name": "预备干员-医疗(卫戍协议)"
+    },
+    {
+      "page": "预备干员-后勤",
+      "name": "预备干员-后勤"
+    },
+    {
+      "page": "预备干员-术师",
+      "name": "预备干员-术师"
+    },
+    {
+      "page": "预备干员-术师(卫戍协议)",
+      "name": "预备干员-术师(卫戍协议)"
+    },
+    {
+      "page": "预备干员-特种(卫戍协议)",
+      "name": "预备干员-特种(卫戍协议)"
+    },
+    {
+      "page": "预备干员-狙击",
+      "name": "预备干员-狙击"
+    },
+    {
+      "page": "预备干员-狙击(卫戍协议)",
+      "name": "预备干员-狙击(卫戍协议)"
+    },
+    {
+      "page": "预备干员-辅助(卫戍协议)",
+      "name": "预备干员-辅助(卫戍协议)"
+    },
+    {
+      "page": "预备干员-近卫(卫戍协议)",
+      "name": "预备干员-近卫(卫戍协议)"
+    },
+    {
+      "page": "预备干员-近战",
+      "name": "预备干员-近战"
+    },
+    {
+      "page": "预备干员-重装",
+      "name": "预备干员-重装"
+    },
+    {
+      "page": "预备干员-重装(卫戍协议)",
+      "name": "预备干员-重装(卫戍协议)"
+    },
+    {
+      "page": "领主·Sharp",
+      "name": "领主·Sharp"
+    }
+  ],
+  "skipped": [],
+  "removed_stale": 0,
+  "module_mm": {
+    "qr_card": 0.15236666666666668,
+    "barcode": 0.49677215189873414
+  }
+}

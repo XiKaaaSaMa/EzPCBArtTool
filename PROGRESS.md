@@ -1,5 +1,79 @@
 # 工作进度快照
 
+**上次进度（2026-11-07 · 1.0.6 内测发布准备完成）**
+
+1. 用户明确要求内测版本号加一并推 GitHub、个人网站。源码与安装器默认版本已升为 **1.0.6**；本轮将完成 GitHub 代码与预发布、CNB 下载附件、网站工具页/更新日志/应用内更新清单同步，发布结果待后续实测补录。
+2. **2026-11-07** 标准 `run.bat test`：**1860 passed / 0 failed / 3 skipped / 62 条 Qt 弃用提醒，318.12 秒，退出码 0**。Python 3.12.10、pytest 9.1.1、PySide6 6.11.2，日志 `out/2026.11.7test/release-1.0.6/pytest-full.log`。两项缺少历史鸿雪模板，一项缺少完整立绘库的惊蛰真实图；本次自带两份模板均回读通过。
+3. 1.0.6 最终候选安装包 **66,848,726 字节**，SHA-256 `4150a3888bf7f598e63b18e977ad82a029ed4e81800e1aa25926bdeef3342c48`；路径 `out/2026.11.7test/release-1.0.6/package/EzPCBArtTool_v1.0.6_安装包.exe`。实际全新安装读取 1950 个素材文件，与源码哈希一致；嵌入版本1.0.6、文字/图片/裁切/Java滤镜、启用证书验证的HTTPS、无效板框拒绝、epro2独立校验和Gerber第三方回读通过，安装目录零写入。
+4. 真实 1.0.4→1.0.6 覆盖升级通过，旧版 exe 生成的隔离草稿与图片在升级前后逐字节不变，旧依赖哨兵被清理，升级后全部素材可读且实际界面启动成功。全新安装截图与构建版逐像素一致；日志、截图、逐文件清单、环境和报告统一放在 `out/2026.11.7test/release-1.0.6/`。
+5. 个人网站存在未提交的作品展示功能，本轮用网站提交 `7986c1a` 的独立副本，仅加入本轮工具页、更新日志和下载信息。独立副本已完成 11 页构建，类型检查 0 errors / 0 warnings / 0 hints；保留原工作区其他改动，不一并发布。
+
+---
+
+## 历史快照（2026-11-07 · 素材纳入 1.0.5）
+
+**上次进度（2026-11-07 · 软件自带素材与安装读取验收）**
+
+1. 按用户要求将库外 `明日方舟-艺术板素材`、`通行证模板源文件` 复制进仓库 `assets/`，共 1950 个运行资源文件（另有根目录说明）。原库未改动；只有副本 README 和 subset.json 中的本机绝对路径转为相对路径。全部其余文件逐字节与原库一致，两份模板添加精确 Git 忽略例外和二进制属性。
+2. `asset_root()` 默认读取源码 `assets/` 或冻结版 `_MEIPASS/assets/`，不依赖外部兄弟目录、当前工作目录或本机绝对路径；`PCBART_ASSET_ROOT` 仍可显式替换整个素材库。模板文字核对脚本也改走同一入口。草稿目录命名及读写规则未变。
+3. 根目录补入可复用的 `PCB艺术板工具.spec` 和 `icon/app.ico`，明确收集两份素材与 Java 资源；安装器可用 `AppBuildDir` 指定构建目录。新增 `--verify-assets --output <报告>` 入口用于真实 exe 的资源验收，不改变界面流程。
+4. **2026-11-07** 标准入口 `run.bat test`：**1860 passed / 0 failed / 3 skipped / 62 条 Qt 弃用提醒，302.89 秒，退出码 0**。环境为 Windows 11、Python 3.12.10、pytest 9.1.1、PySide6 6.11.2；完整依赖在 `out/2026.11.7test/bundled-assets/environment.json`，日志为 `pytest-full.log`。新增 8 项测试；相对 11-05 的历史数量，多跳过 1 项完整立绘库真实图回归（内置素材不包含完整立绘），另两项仍引用缺失的历史鸿雪模板。两份本次加入的空白模板均有独立回读通过。路径注入旧实现后，3 项回归测试按预期失败，日志 `regression-injection.log`。
+5. 当前版本保持 **1.0.5**，重建素材验收安装包 `out/2026.11.7test/bundled-assets/package/EzPCBArtTool_v1.0.5_安装包.exe`，**66,847,921 字节**，SHA-256 `98d510ca816a10af3293dd09d5db0ff54eb881313b81f3a643ba2386e3dffc5f`。本次使用本机 Python/Qt 依赖，与 11-05 的依赖版本不同，旧安装包未覆盖；未发布、提交、推送或归档到库外。
+6. 源码、冻结 exe 和真实安装到临时中文目录的 exe，均读到 **463 位干员、1343 处有效图标引用、1039 张可解码 PNG、902 个可解析 SVG、两份可解析模板**。未设置外部素材路径，从 `C:/Windows/Temp` 启动；1950 个运行资源逐文件哈希一致，安装目录在读取前后未改变。报告为 `source-assets.json`、`frozen-assets.json`、`installed-assets.json`、`install-result.json`；已仅清理临时安装、其注册项与专用入口，不运行会清理用户缓存的生产卸载器，真实用户草稿与数据目录未操作。汇总与证据见同目录 `验收报告.md`、`summary.json`。
+
+---
+
+## 历史快照（2026-11-05）
+
+**上次进度（2026-11-05 · 1.0.5 安装包验收完成，未发布）**
+
+1. 当前源码及安装包版本为 **1.0.5**，已发布版本仍为 **1.0.4**。本轮完成安装包验收与本地归档，未提交、推送或发布。
+2. 真实覆盖升级发现旧 Qt 6.11/Shiboken DLL 残留导致新版无法启动。仓库新增 `installer.iss`，写入前仅清理程序专用 `{app}\_internal`；最终 1.0.4→1.0.5 升级已通过，旧草稿与关联缓存逐字节未变，实际窗口可正常打开。新增回归测试已验证撤掉修复即失败。
+3. **2026-11-05** 通过 `run.bat test` 全量运行：**1853 passed / 0 failed / 2 skipped / 62 条 Qt 弃用提醒，121.64 秒，退出码 0**。环境为 Python 3.12.14、pytest 9.2.0、PySide6 6.12.0，完整依赖在 `out/2026.11.5test/installer-acceptance/environment.json`；日志为同目录 `pytest-full.log`。两项跳过仍为缺少模板源文件，比 2026-11-04 新增 1 项安装器回归测试。
+4. 最终安装包全新安装、中文与图标、三个开始菜单入口及许可、图片/裁切/文字/彩印、Java 滤镜、带证书验证的 HTTPS、安装目录零写入、epro2 独立校验与 Gerber 第三方回读均通过。卸载清除程序、入口、登记、缓存及输出，临时草稿文件哈希不变；测试数据已留存到本轮产物目录，用户原有源码草稿库哈希未变，机器上的临时安装已清理。
+5. 最终安装包：`out/2026.11.5test/installer-acceptance/package/EzPCBArtTool_v1.0.5_安装包.exe`，**60,016,316 字节（57.24 MiB）**，SHA-256 `3b95119065dd4cd171c1b9cf5d5e9427f3fac39447c06674e19de1ad3be6b0f6`；已按内测类型归档。报告与全部证据在 `out/2026.11.5test/installer-acceptance/验收报告.md`。
+6. 用户已明确省略“无 Python 机器”检查。旧包中未改动的更新模块已对本机测试清单验证完整下载、206 续传、哈希校验和篡改拒绝，实际下载包用于升级；线上 1.0.5 尚未发布，未将其写成线上更新弹窗起装通过。后续按用户指令决定发布或下一项开发；完整铜层工艺校验仍见后续计划，SVG 导入继续暂停，板框自动开孔不恢复。
+
+---
+
+## 本轮安装包验收证据（2026-11-05）
+
+- 最终报告：`out/2026.11.5test/installer-acceptance/验收报告.md`；机器可读清单 `summary.json`、依赖环境 `environment.json`、归档结果 `archive-result.json`。
+- 最终 `run.bat test` 全量：1853 passed / 0 failed / 2 skipped / 62 条 Qt 弃用提醒，121.64 秒，退出码 0；`pytest-full.log`。OpenCV 原生 imwrite 不支持中文临时夹具路径，首次错误环境运行保留在 `pytest-full-chinese-temp-invalid.log`；未删改测试，使用 ASCII 临时目录复测通过。
+- 升级故障：原候选 1.0.4→1.0.5 后残留旧 Qt/Shiboken DLL，真实 exe 启动失败；原候选、stderr 和清单留在 `pre-fix/`。最终包清理依赖目录后，`final-upgrade/exe-result.json` 记录退出 0、stderr 为空，真实窗口打开旧草稿见 `ui-old-draft-opened.txt`；`upgrade/after-upgrade.json` 证明升级前后草稿及关联文件逐项哈希一致。
+- 最终全新安装：`InstallNew-result.json`、`final-fresh-install/result.json`；133 个应用文件与构建目录一致，运行前后 136 个安装文件哈希不变，真实 Windows Qt 渲染截图与构建版逐像素一致；Gerber 板框闭合无自交，与预期轮廓对称差面积为 0。
+- 安装包内功能：`installed-payload/result.json`；裁切后 80×120 PNG 与指定源像素相同，文字非空，包内 Java sharpen 动态范围 255，开启证书验证的 HTTPS 返回 200，非法板框拒绝；两个 epro2 独立 Node 校验日志均为 VERIFY OK。
+- 卸载与还原：`Uninstall-result.json`、`final-upgrade/uninstall-result.json`、`cleanup-result.json`。程序、开始菜单、登记项、缓存和输出均清理，临时草稿文件哈希不变；任务创建的物理数据目录原先不存在，验收后完整留存到 `preserved-appdata-final/` 并移除，原有源码草稿库哈希未变。首轮 junction 导致缓存清理被跳过，不作为有效通过结果；记录另存 `junction-Uninstall-*`。
+- 修正旧资源审计：`figure_crop` 和内嵌人脸模型仅供离线素材裁切脚本使用，当前 GUI 不依赖它们；实际界面裁切编码入口已按安装包内 `color_image` 逐像素验收。根目录 `installer.iss` 是后续打包的安装脚本来源，不沿用库外旧脚本。
+
+---
+
+## 历史快照（2026-11-04；以下为当时状态）
+
+**上次进度（2026-11-04 · 导出与测试入口修复，1.0.5 构建中）**
+
+1. 当前源码版本为 **1.0.5**，已发布版本仍为 **1.0.4**。已按用户要求实际模拟错误并展示两张截图，随后开始构建；安装包与冻结版验收尚未完成，未发布。
+2. Gerber 在写文件前拒绝无效板框，下单 ZIP 保留细颈警告并传到实际界面；标准测试入口限定 Python 3.11/3.12、可用 `PCBART_PYTHON` 指定，并返回实际退出码。两条嵌套坐标断言、中文路径夹具和子进程编码已修复，草稿目录独立隔离。
+3. 本轮通过修复后的 `run.bat test` 全量运行：**1852 passed / 2 skipped / 62 条 Qt 弃用提醒，165.63 秒，退出码 0**。VTracer 与 scikit-image 对照已运行；两项跳过均为本机缺少模板源文件。通过数较 2026-10-14 历史基线增加 12 项。 无素材库、无外接模型、无 Node 环境另跑全量：**1798 passed / 56 skipped**，148.43 秒；62 条提醒同为 Qt 弃用提醒。
+4. 实际界面已确认：自交板框拒绝、不生成新 ZIP，已有 ZIP 哈希不变；0.4 mm 细颈警告可见。正常 60×40 mm 板框经 gerbonara 回读为 4 段、闭合无自交、周长 200 mm；含光圈包围盒为 60.125×40.125 mm。有效截图在 `out/2026.11.4test/execution/final/rendered/`。
+5. README、路线图、协作入口与打包文档已统一；完整铜层线宽/线距/板边距离校验单列后续计划，尚未实施。**SVG 导入继续暂停**；TRACE、通用模板等未扩项。
+6. 打包副本在 `out/2026.11.4test/package/source/`，Pillow 排除项已移除、SSL 依赖 DLL 已保留；PyInstaller 6.22.3 在隔离目录准备。首次冻结验收发现构建 PATH 混入 ICU DLL 和运行时证书数据漏收，正在修正构建副本重建；冻结包图片、文字、裁切、滤镜、导出与证书验证 HTTPS 待复验后，再编译安装器。
+7. 另一台机器上的旧版更新、下载校验、安装与草稿保留仍待验收；本轮未操作用户实际软件或草稿库。未提交、推送或发布。
+
+---
+
+## 本轮验收证据（2026-11-04）
+
+- 最终全量日志：`out/2026.11.4test/execution/final/pytest-final.log`，由修复后的 `run.bat test` 启动，1852 passed / 2 skipped，62条提醒均为Qt弃用提醒，退出码0。Python3.12.14、pytest9.2.0、numpy2.5.4、OpenCV5.0.0、Shapely2.2.0、PySide6 6.12.0、gerbonara1.6.3；另准备VTracer0.6.15与scikit-image0.26.0对照依赖。
+- 无外部资源全量：`out/2026.11.4test/execution/final/pytest-noassets.log`，无素材库、无外接模型且PATH仅Windows系统路径（无Node），1798 passed /56 skipped /62条Qt弃用提醒，148.43秒。
+- 审查复测的1823 passed /2 failed /4 skipped为修复前结果；最初offscreen缺字体截图、第一次PYTEST_ADDOPTS反斜杠被shlex解释的临时路径配置错误均不作为有效产品验收结果。有效最终图是`final/rendered/`下使用与正常main相同微软雅黑字体重新渲染的两张对话框。
+- 实际界面与独立回读：`final/acceptance-ui.json`；Gerber、启动器与测试环境的故障注入日志分别在`execution/gerber/`、`execution/launcher/`、`execution/test_env/`，撤掉相应修复均按预期失败。
+- 独立复核与清单：`execution/独立复核意见.md`、`执行验收清单.md`；打包准备与资源审计在`打包准备交接.md`、`gerber/packaging-audit.json`。当前构建和安装器验收待完成，不把历史安装记录复用为本轮结果。
+
+---
+
+## 历史快照（2026-10-14；下文“下一步”只对应当时）
+
 > 保存时间：**2026-10-14（1.0.4 发布 + 教程更新）**
 >
 > ⭐⭐ **2026-10-14：1.0.4 已发布**（安装包 + GitHub Release + CNB + 官网四处到位），

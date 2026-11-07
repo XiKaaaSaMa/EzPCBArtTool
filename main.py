@@ -24,6 +24,12 @@ def main() -> int:
     # nothing and the failure it prevents is a window that multiplies itself.
     multiprocessing.freeze_support()
 
+    # Packaging acceptance uses the actual executable and its embedded paths.
+    if len(sys.argv) > 1 and sys.argv[1] == "--verify-assets":
+        from tools.verify_bundled_assets import main as verify_main
+
+        return verify_main(sys.argv[2:])
+
     from tools.gui_mockup import main as gui_main
 
     return gui_main()

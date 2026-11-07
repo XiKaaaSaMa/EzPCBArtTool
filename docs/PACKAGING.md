@@ -1,8 +1,69 @@
 # 打包与发布
 
 > 面向"把源码交付成一个能装能用的程序"这件事。
-> 打包脚本在 `P:\Zcode开发专用文件夹\PCB工具打包测试\`，
-> 源码仓库只保留本文件与版本规则。
+> 历史打包脚本保存在本机独立打包目录；本轮在工作区 `out/2026.11.4test/` 下准备副本，
+> 具体路径与当前状态见下节。
+
+---
+
+## 本轮打包状态（2026-11-07）
+
+1.0.6 内测候选为 `out/2026.11.7test/release-1.0.6/package/EzPCBArtTool_v1.0.6_安装包.exe`，
+66,848,726 字节，SHA-256 `4150a3888bf7f598e63b18e977ad82a029ed4e81800e1aa25926bdeef3342c48`。
+2026-11-07 标准测试 1860 passed / 0 failed / 3 skipped，318.12 秒；Python 3.12.10 / pytest 9.1.1 / PySide6 6.11.2。
+真实全新安装与 1.0.4 覆盖升级、旧草稿保留、素材一致性、界面与导出独立回读均通过。
+日志与本轮报告在 `out/2026.11.7test/release-1.0.6/`，GitHub/CNB/网站同步结果见 `PROGRESS.md` 顶部。
+
+## 历史素材验收包（2026-11-07 · 1.0.5）
+
+内置素材版验收包位于 `out/2026.11.7test/bundled-assets/package/EzPCBArtTool_v1.0.5_安装包.exe`，
+66,847,921 字节，SHA-256 `98d510ca816a10af3293dd09d5db0ff54eb881313b81f3a643ba2386e3dffc5f`。
+源码、冻结版与真实中文目录安装版的 1950 个素材哈希全部一致，463 位干员及全部图标引用、PNG、SVG、两份模板可读。
+2026-11-07 全量 1860 passed / 0 failed / 3 skipped / 62 warnings，302.89 秒；Python 3.12.10、pytest 9.1.1、PySide6 6.11.2。
+日志、依赖、逐文件哈希与清理结果见该目录的 `验收报告.md`、`environment.json`、`pytest-full.log`、`install-result.json`。
+本轮不发布或推送；旧包与旧日志保留。下文 11-05 的升级及卸载验收属于旧包，不复用为本轮实测。
+
+## 历史打包状态（2026-11-05）
+
+已发布版本为 1.0.4；**1.0.5 已完成打包与本机安装验收，未提交、推送或发布**。2026-11-05 标准入口 `run.bat test` 为 **1853 passed / 0 failed / 2 skipped / 62 条 Qt 弃用提醒，121.64 秒，退出码 0**；Python 3.12.14、pytest 9.2.0、PySide6 6.12.0，完整依赖和日志见 `out/2026.11.5test/installer-acceptance/environment.json`、`pytest-full.log`。
+
+最终安装包为 `out/2026.11.5test/installer-acceptance/package/EzPCBArtTool_v1.0.5_安装包.exe`，**60,016,316 字节（57.24 MiB）**，SHA-256 **`3b95119065dd4cd171c1b9cf5d5e9427f3fac39447c06674e19de1ad3be6b0f6`**，已按内测类型归档。2026-11-04 的旧候选虽可全新安装，但覆盖升级会受旧 DLL 干扰，不作为最终交付件。
+
+PyInstaller 应用目录仍来自 `out/2026.11.4test/package/source/`，最终安装器用仓库根目录新增的 `installer.iss` 同步到该构建副本后重新编译。后续使用该源码脚本，不能继续复制库外旧脚本；本轮文件尚未提交。打包目录需包含最终源码、`main.py`、`requirements.txt`、`LICENSE`、`icon/app.ico`、`java_lineart/`、`PCB艺术板工具.spec` 和仓库安装脚本；输入与输出逐项核对哈希。
+
+旧 spec 的 `PIL` 排除已移除；最终安装版的图片读尺寸、裁切编码、彩印、文字和包内 Java 滤镜均已实测。包内 133 个应用文件与构建目录逐项一致，安装后的 136 个文件在运行前后哈希一致。最终包全新安装、1.0.4 覆盖升级、实际打开旧草稿、epro2 独立校验、Gerber 第三方回读和卸载清理均通过。安装编译器 Inno Setup 6.7.3，应用构建器 PyInstaller 6.22.3。
+
+`_ssl.pyd` 的 `libcrypto-3-x64.dll`、`libssl-3-x64.dll` 和当前解释器伴随证书数据均已收集；最终包的证书及主机名验证开启，HTTPS 只读请求返回 200。此前将 `face_model.py` 列为界面运行依赖的判断已纠正：它只由离线 `tools/crop_figure_library.py` 经 `figure_crop` 使用，当前 GUI 不调用，无需加入应用包。界面取景由 `DesignCanvas` 和 `color_image` 处理，实际编码后的裁切图已验尺寸和逐点像素。
+
+用户于 2026-11-05 明确省略“无 Python 机器”检查。更新下载使用实际旧包中提取的未改动模块，对本机回环测试清单验证完整下载、HTTP 206 续传、SHA-256 和篡改拒绝；实际下载的最终包用于覆盖升级。线上 1.0.5 尚未发布，未将本机测试写成线上更新弹窗起装通过。
+
+详细报告见 `out/2026.11.5test/installer-acceptance/验收报告.md`；后文通用流程继续适用，旧交接材料仅作历史记录。
+
+---
+
+## 软件自带素材（2026-11-07）
+
+仓库根目录的 `PCB艺术板工具.spec` 为当前构建入口，收集 `java_lineart/` 以及
+`assets/明日方舟-艺术板素材/`、`assets/通行证模板源文件/`。图标源文件为
+`icon/app.ico`。不要再复制缺少素材规则的旧 spec。
+
+素材是只读应用资源，目录版安装后位于 `{app}/_internal/assets/`；
+`asset_root()` 从 `sys._MEIPASS` 定位，不按 exe 的父目录或当前工作目录猜测。
+草稿、缓存和用户设置仍走原有用户数据目录，不复制进安装目录。
+`PCBART_ASSET_ROOT` 可以显式替换整份库，用于自定义素材和隔离测试。
+
+构建可指定 `--distpath`、`--workpath`。安装器可通过 `/DAppBuildDir=<应用目录>`
+引用该构建结果，默认仍是 `dist/EzPCBArtTool`。资源漏收时构建必须失败。
+
+验收使用真实 exe（没有 Python 源码目录依赖）：
+
+```bat
+EzPCBArtTool.exe --verify-assets --output <本轮日期目录>\installed-assets.json
+```
+
+该命令读取干员库、检查全部图标引用、解码全部 PNG、解析 SVG 和两份模板，
+输出每个文件的 SHA-256。与源码检查结果逐项一致才算通过；须清除
+`PCBART_ASSET_ROOT` 后从其他工作目录运行，避免开发机外部库掩盖漏打包。
 
 ---
 
@@ -28,14 +89,15 @@
 > - 公测版 → `0.1.0`
 > - 正式版 → `1.0.0`
 
-**当前代码版本：`1.0.1`**（`pcbart/__init__.py` 的 `__version__`）。
+**当前已发布版本：`1.0.4`；本轮目标版本：`1.0.6`（内测，已验收、待发布）**。源码版本由 `pcbart/__init__.py` 的 `__version__` 决定。
 规则：**打包类型由用户决定，版本号跟着类型走**；`__version__` 只是"现在
 代码是什么版本"，安装包用 `/DAppVersion=` 单独给。
 
-## 一·二、已交付版本（2026-10-10 更新）
+## 一·二、已交付版本（按历史发布记录，2026-11-04 整理）
 
 | 版本 | 类型 | 安装包 | 归档位置 |
 |---|---|---|---|
+| **1.0.4** | 测试版 | `EzPCBArtTool_v1.0.4_安装包.exe`（57 121 683 字节） | `安装包保存区\内测\` |
 | **1.0.1** | 测试版 | `EzPCBArtTool_v1.0.1_安装包.exe`（**54.1 MB**） | `安装包保存区\内测\` |
 | **1.0.0** | 正式版 | `PCB艺术板工具_v1.0.0_安装包.exe`（**50.14 MB**） | `安装包保存区\正式版\` |
 | 0.1.1 | 公测版 | 45.7 MB | `安装包保存区\公测\` |
@@ -197,9 +259,9 @@ P:\Zcode开发专用文件夹\安装包保存区\
 **所以程序文件名改了、安装目录改了，但数据目录保持不动。**
 `installer.iss` 的 `[UninstallDelete]` 也继续指向旧路径，卸载行为不变。
 
-### ⚠️ 已装 1.0.0 的用户需要手动卸载
+### 1.0.0 改名迁移说明（历史，1.0.1 起生效）
 
-程序名与安装目录都变了，1.1.0 **不会覆盖** 1.0.0，而是装到
+程序名与安装目录都变了，1.0.1 起的安装包 **不会覆盖旧目录中的** 1.0.0，而是装到
 `EzPCBArtTool` 目录。旧版留在 `PCB艺术板工具` 目录里，需要用户自己去
 控制面板卸载一次。
 
@@ -207,7 +269,7 @@ P:\Zcode开发专用文件夹\安装包保存区\
 
 ---
 
-## 二、打包流程
+## 二、打包流程（常规流程；本轮使用工作区副本）
 
 ### 前置
 
@@ -223,11 +285,11 @@ P:\Zcode开发专用文件夹\安装包保存区\
 ```bat
 :: 1) 备份源码（改动前先备份，见第三节）
 :: 2) 打包应用本体
-cd "P:\Zcode开发专用文件夹\PCB工具打包测试"
+cd "<本轮打包副本>"
 python -m PyInstaller --clean --noconfirm "PCB艺术板工具.spec"
 
 :: 3) 生成安装包，版本号按第一节的规则填（先问用户是哪种版本）
-"%USERPROFILE%\InnoSetup\ISCC.exe" /DAppVersion=1.0.4 installer.iss
+"%USERPROFILE%\InnoSetup\ISCC.exe" /DAppVersion=1.0.5 installer.iss
 
 :: 4) 把安装包归档到 安装包保存区 下对应版本类型的子目录
 ```
@@ -243,31 +305,21 @@ MSYS 当路径转换吃掉。
 
 | 产物 | 位置 | 体积参考 |
 |---|---|---|
-| 应用目录 | `PCB工具打包测试\dist\PCB艺术板工具\` | 174 MB |
-| **安装包** | `PCB工具打包测试\PCB艺术板工具_v<版本>_安装包.exe` | **45 MB** |
+| 应用目录 | `<本轮打包副本>\dist\EzPCBArtTool\` | 以本轮构建为准 |
+| **安装包** | `<本轮打包副本>\EzPCBArtTool_v<版本>_安装包.exe` | 以本轮构建为准 |
 | 交付位置 | `安装包保存区\内测\`、`公测\`、`正式版\` 按版本类型归档 | — |
 
 安装包比应用目录小很多是正常的：`lzma2/max` 对 Qt、OpenCV 的 DLL 压缩率很高。
 
 ---
 
-## 三、备份
+## 三、备份与同步
 
-用户要求：**每次打包前把完整源码备份到 `PCB工具打包测试` 目录。**
+历史流程把源码同步到本机独立的 `PCB工具打包测试` 目录。本轮在工作区 `out/2026.11.4test/` 下建立独立副本；spec 只读复用并修正旧配置，安装器使用根目录新增的 `installer.iss`。不覆盖库外旧打包目录。
 
-用 `tar` 排除构建垃圾，避免把上一次的产物混进备份：
+同步排除 `.git/`、`out/`、`__pycache__/`、`.pytest_cache/`、`推GitHub/`、`AGENTS.local.md`、历史安装包与模型权重。源目录的 `out/` 内同时包含目标副本时，必须明确排除，避免递归复制。保留构建所需的许可证、图标、Java jar/class 与源码内嵌资源。
 
-```bash
-cd "P:/Zcode开发专用文件夹/PCB艺术板工具"
-tar -cf - --exclude=.git --exclude=__pycache__ --exclude=.pytest_cache . \
-  | (cd "P:/Zcode开发专用文件夹/PCB工具打包测试" && tar -xf -)
-```
-
-备份后**核对文件数一致**再继续，否则备份是假的：
-
-```bash
-find . -type f -not -path './.git/*' -not -path '*__pycache__*' | wc -l
-```
+记录相对路径、文件大小和 SHA-256 清单，并与副本逐项比对；文件总数相同不能证明内容一致。库外脚本的旧默认版本号和依赖排除项也必须单独检查。
 
 ---
 
@@ -312,7 +364,7 @@ ffmpeg 等）。**删任何 DLL 都要重新跑一次并比对截图哈希**，
 不能只看"程序能启动"：
 
 ```bash
-./PCB艺术板工具.exe --screenshot new.png --open-preprocess
+./EzPCBArtTool.exe --screenshot new.png --open-preprocess
 python -c "对比 new.png 与你删之前那张的 sha256"
 ```
 
@@ -327,15 +379,45 @@ python -c "对比 new.png 与你删之前那张的 sha256"
     ('java_lineart', 'java_lineart'),
 ```
 
-保留 `src/`、`lib/`、`classes/` 三部分即可：`classes/` 里的 `.class` 是
+保留 `src/`、`lib/`、`classes/` 三部分以及许可证即可：`classes/` 里的 `.class` 是
 `--release 8` 预编译的，用户装了 JRE 8+ 就能跑，不必装 JDK。
 `pcbart/java_filters.tool_dir()` 先在源码树里找、再在**可执行文件旁边**
-找 `java_lineart/`，所以打包后放在应用目录根下即可。
+找 `java_lineart/`；1.0.4 的目录包实测位于 `_internal/java_lineart/`。本轮须以 `tool_dir()` 实际解析结果及滤镜运行为准。
 
 ⚠️ 打包后验证一次：启动后【图像预处理 → 滤镜】下拉框应当可用；
 被禁用（并写明原因）意味着 `java_lineart/` 没进包或机器没装 Java。
 
-### 6. 发布脚本取 GitHub 令牌：`git credential fill` 必须带 `username=`
+### 6. 构建 PATH 与运行时证书数据（2026-11-04 实测）
+
+本轮第一次冻结程序在实际启动时出现 `QtCore` 的 `WinError 127`。PE 导入/导出表定位到构建 PATH 中的 Poppler 目录：PyInstaller 误收其 ICU 78 DLL，而 Qt 需要的系统 ICU 接口没有该版本后缀。文件名看似匹配，导出符号却不兼容。仅检查“包里有这个 DLL”不能验收。
+
+构建前记录 PATH，排除 Poppler、其他软件私有 DLL 目录和无关工具目录；使用已明确的构建 Python 与系统工具路径。清理后执行干净构建，不从系统或别的软件目录手工复制 DLL 补洞。构建后必须从无源码和无开发 PATH 的隔离目录启动最终 exe，核对 QtCore、窗口和实际导出行为。2026-11-05 的最终安装版已完成复验。
+
+本轮使用的 bundled Python 的 `ssl.py` 还依赖同目录 `codex-rejected-cas.pem`。首次冻结遗漏该文件，创建默认 `SSLContext` 时失败。spec 按当前构建解释器条件收集：
+
+```python
+import ssl
+ssl_rejected_cas = Path(ssl.__file__).with_name("codex-rejected-cas.pem")
+ssl_datas = [(str(ssl_rejected_cas), ".")] if ssl_rejected_cas.is_file() else []
+# Analysis(datas=[("java_lineart", "java_lineart")] + ssl_datas, ...)
+```
+
+这是当前解释器伴随数据的收集，不是所有 Python 都必须使用该文件。保留原 `ssl` 实现与证书验证，不删除安全配置或关闭验证来绕过缺文件。冻结后必须实测 `ssl.create_default_context()` 和带证书验证的只读 HTTPS 请求，并记录最终证据。
+
+### 7. 覆盖升级必须替换程序专用依赖目录（2026-11-05）
+
+1.0.4 将 Qt 6.11/Shiboken DLL 放在 `_internal/PySide6/` 和 `_internal/shiboken6/`，本轮构建将新版 DLL 放在 `_internal/`。逐文件覆盖会保留旧 DLL，扩展模块先读到旧库，导致升级后的 exe 报 `DLL load failed while importing Shiboken`。新文件哈希全部正确仍可能发生此故障。
+
+仓库 `installer.iss` 在安装前只清理程序专用目录，再写入完整的新目录：
+
+```ini
+[InstallDelete]
+Type: filesandordirs; Name: "{app}\_internal"
+```
+
+不要扩大到 `{app}` 或用户数据目录。验收须比较完整相对文件清单以发现残留，实际运行升级后的 exe，并核对草稿及关联缓存。新增回归测试 `tests/test_installer_upgrade.py`；本轮撤掉清理段时测试失败，修复后的真实 1.0.4→1.0.5 升级及旧草稿显示通过。
+
+### 8. 发布脚本取 GitHub 令牌：`git credential fill` 必须带 `username=`
 
 **不带 `username=` 会挂起**：本机凭据助手是 Git Credential Manager，凭据按账号
 存；只给 `protocol`/`host` 时它定不了账号，回落到交互式提示——无人值守时表现为
@@ -359,17 +441,17 @@ username=XiKaaaSaMa
 
 装完必须**实际跑一遍**，缺一项都不算验证过：
 
-- [ ] 805 项测试通过（`run.bat test`）
+- [ ] 完整测试通过（`run.bat test`），记录运行环境、实际通过/跳过数和日志；历史固定条数不作本轮结论
 - [ ] 从**要交付的那个安装包**全新安装
 - [ ] 安装后从安装目录启动，界面中文正常、图标正常
 - [ ] 载入一张图，跑通板画流程，画布双色显示正确
 - [ ] 缓存写在 `%LOCALAPPDATA%`，**安装目录运行时零写入**
 - [ ] 导出 `.epro2`，过 `node tools\verify_epro2.mjs` 独立校验
-- [ ] 卸载干净：程序目录、开始菜单、用户缓存都不残留
+- [ ] 在隔离的全新安装环境验证卸载清理；另做升级验收，确认既有草稿保留，不使用真实草稿库做清理试验
 
 ⚠️ **"在我机器上是好的"不算验证。** 上一条清单的意义就在于：
 这台机器装了 Python 和全套依赖，很多问题只有换台干净机器才暴露。
-交付给用户前，至少要在**没有 Python 的机器**上装一次。
+通常交付前应在**没有 Python 的机器**上装一次。2026-11-05 本轮由用户明确省略该项，记录为省略，不写成通过；本机验收与线上真实更新链路的范围分别记录。
 
 ---
 
@@ -396,6 +478,6 @@ PCB工具打包测试\icon\app.ico
 - 安装向导默认中文，英文可选（Inno 自带）。
   需在 Inno 的 `Languages\` 目录放 `ChineseSimplified.isl`，仓库不带它。
 - 安装包**未做代码签名**，用户首次运行会有 SmartScreen 提示。
-  正式对外发布需要买证书。
+  签名状态在发布说明中如实列出。
 - 体积主要来自 Qt（64 MB）和 OpenCV（82 MB），不是 Python（解释器仅 6.7 MB）。
   **不要为了省体积去重写 C++**，那会丢掉全部已验证的算法与测试。

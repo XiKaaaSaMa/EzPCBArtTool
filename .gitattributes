@@ -11,6 +11,7 @@
 # The captured fixture is evidence, not source: keep its bytes exactly as
 # extracted from the editor so the calibration figures stay reproducible.
 *.epru -text
+*.epro2 binary
 
 # Binary assets.
 #

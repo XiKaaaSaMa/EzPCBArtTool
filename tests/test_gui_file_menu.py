@@ -286,6 +286,26 @@ def test_save_as_order_file_reports_a_problem_instead_of_writing_junk(
     assert not target.exists()
 
 
+def test_order_export_shows_thin_neck_warning_without_artwork(
+    window, tmp_path, monkeypatch
+):
+    board = window.design_canvas.board
+    board.outline_ready = True
+    board.outline = BoardOutlineSpec(shape=OutlineShape.TEMPLATE, template_outline=[
+        (0, 0), (20, 0), (20, 9.8), (30, 9.8), (30, 0), (50, 0),
+        (50, 20), (30, 20), (30, 10.2), (20, 10.2), (20, 20), (0, 20),
+    ])
+    target = tmp_path / "order.zip"
+    monkeypatch.setattr(gui_mockup.QFileDialog, "getSaveFileName",
+                        lambda *args, **kwargs: (str(target), ""))
+    shown = []
+    monkeypatch.setattr(gui_mockup.QMessageBox, "information",
+                        lambda *args, **kwargs: shown.append(str(args[-1])))
+    assert gui_mockup.export_gerber_project(window) == str(target)
+    assert target.exists()
+    assert len(shown) == 1 and shown[0].count("最窄处") == 1
+
+
 def test_the_order_file_is_remembered_separately_from_the_project(
     window, tmp_path, monkeypatch
 ):

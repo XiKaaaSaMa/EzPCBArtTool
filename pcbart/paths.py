@@ -126,17 +126,6 @@ def default_output_dir() -> Path:
     return Path("out")
 
 
-#: Where the artwork libraries live by default: a sibling of the project folder.
-#: They are gigabytes, so they must never be swept into a commit.
-#:
-#: ⚠️ **Derived from the project folder rather than written out.** A literal
-#: ``P:\...`` here would make the default correct on exactly one machine, and
-#: the symptom is not an error but *silent skipping* -- the tensor library simply
-#: reports "no operator database" and the panel shows an empty roster. Machines
-#: that keep the library elsewhere set :data:`ASSET_ROOT_ENV`.
-#: Frozen builds have no project folder beside them, so they must set it too.
-_ASSET_LIBRARY = Path(__file__).resolve().parent.parent.parent / "PCB艺术板工具素材库"
-
 ASSET_ROOT_ENV = "PCBART_ASSET_ROOT"
 """Override for the library's location, for exactly the reason
 ``PCBART_DRAFTS_DIR`` exists: a test or a script that reads the operator
@@ -152,14 +141,20 @@ wrong.
 
 
 def asset_root() -> Path:
-    """The artwork library root, whether or not it exists.
+    """Read-only bundled assets, or an explicitly selected external library.
 
-    Returned even when missing -- callers ask "is the library here" rather than
-    being handed an exception, because on a machine that has never downloaded
-    it the honest state is "no operator database", not a crash.
+    PyInstaller places data under ``_MEIPASS`` (``_internal`` in a directory
+    build). Source runs use the repository's assets folder. Neither depends
+    on the working directory or on a sibling library on the developer's PC.
+    An explicit override is authoritative even when missing, so tests and
+    custom libraries never silently mix their content with the bundled copy.
     """
     override = os.environ.get(ASSET_ROOT_ENV)
-    return Path(override) if override else _ASSET_LIBRARY
+    if override:
+        return Path(override)
+    if is_frozen():
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent)) / "assets"
+    return Path(__file__).resolve().parent.parent / "assets"
 
 
 def badge_asset_dir() -> Path:

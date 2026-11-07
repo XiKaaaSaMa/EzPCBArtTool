@@ -616,3 +616,65 @@ def test_a_fragile_outline_warns_in_the_report_the_user_reads(tmp_path):
     assert report["warnings"], "细颈必须出现在报告的 warnings 里"
     assert any("最窄处" in text for text in report["warnings"])
     assert "⚠️" in report["note"], "警示要出现在用户实际读的那句 note 里"
+
+
+def test_self_intersection_is_rejected_before_any_export_overwrites(tmp_path):
+    from pcbart.export import export_design
+
+    board = ArtBoard(outline_ready=True, outline=BoardOutlineSpec(
+        shape=OutlineShape.TEMPLATE,
+        template_outline=[(0, 0), (20, 20), (0, 20), (20, 0)],
+    ))
+    directory = tmp_path / "layers"
+    directory.mkdir()
+    existing_layer = directory / f"{DEFAULT_PREFIX}{OUTLINE_LAYER.file_name}"
+    existing_layer.write_bytes(b"original layer")
+    archive = tmp_path / "order.zip"
+    archive.write_bytes(b"original archive")
+    project = tmp_path / "project.epro2"
+    project.write_bytes(b"original project")
+    for export in (
+        lambda: export_design(board, project),
+        lambda: export_gerber(board, directory),
+        lambda: export_gerber_archive(board, archive),
+    ):
+        with pytest.raises(ValueError):
+            export()
+    assert existing_layer.read_bytes() == b"original layer"
+    assert list(directory.iterdir()) == [existing_layer]
+    assert archive.read_bytes() == b"original archive"
+    assert project.read_bytes() == b"original project"
+
+
+def test_thin_neck_warning_survives_single_file_export(tmp_path):
+    ring = [(0, 0), (20, 0), (20, 9.8), (30, 9.8), (30, 0),
+            (50, 0), (50, 20), (30, 20), (30, 10.2), (20, 10.2),
+            (20, 20), (0, 20)]
+    board = ArtBoard(outline_ready=True, outline=BoardOutlineSpec(
+        shape=OutlineShape.TEMPLATE, template_outline=ring))
+    folder = export_gerber(board, tmp_path / "layers")
+    archive = export_gerber_archive(board, tmp_path / "order.zip")
+    assert folder["warnings"] == archive["warnings"]
+    assert len(archive["warnings"]) == 1
+    assert "最窄处" in archive["warnings"][0]
+    assert archive["note"].count(archive["warnings"][0]) == 1
+
+
+def test_archive_warning_does_not_depend_on_folder_note(tmp_path, monkeypatch):
+    import pcbart.gerber as gerber
+
+    original = gerber.export_gerber
+    def with_extra_note(*args, **kwargs):
+        report = original(*args, **kwargs)
+        report["note"] = "目录报告已变化，临时路径 C:/scratch/example"
+        return report
+    monkeypatch.setattr(gerber, "export_gerber", with_extra_note)
+    board = ArtBoard(outline_ready=True, outline=BoardOutlineSpec(
+        shape=OutlineShape.TEMPLATE, template_outline=[
+            (0, 0), (20, 0), (20, 9.8), (30, 9.8), (30, 0), (50, 0),
+            (50, 20), (30, 20), (30, 10.2), (20, 10.2), (20, 20), (0, 20),
+        ]))
+    report = gerber.export_gerber_archive(board, tmp_path / "order.zip")
+    assert len(report["warnings"]) == 1
+    assert report["note"].count(report["warnings"][0]) == 1
+    assert "C:/scratch/example" not in report["note"]

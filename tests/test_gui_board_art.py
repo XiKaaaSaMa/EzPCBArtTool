@@ -36,7 +36,7 @@ from gui_mockup import (  # noqa: E402
     show_preprocess,
 )
 from pcbart.design_layers import layer  # noqa: E402
-from pcbart.image_prep import imread_unicode  # noqa: E402
+from pcbart.image_prep import imread_unicode, imwrite_unicode  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -59,15 +59,14 @@ def painting_panel(app, tmp_path):
     threshold control would pass. The bands are sized so that neither the
     threshold nor the flip can be confused with the other.
     """
-    import cv2
-
     rgba = np.zeros((160, 120, 4), np.uint8)
     rgba[20:140, 20:100, :3] = 235  # light
     rgba[20:140, 20:100, 3] = 255
     rgba[60:80, 20:100, :3] = 150  # mid: swings with the threshold
     rgba[100:120, 20:100, :3] = 30  # dark
     source = tmp_path / "painting.png"
-    cv2.imwrite(str(source), rgba)
+    imwrite_unicode(source, rgba)
+    assert np.array_equal(imread_unicode(source, -1), rgba)
 
     window = build_window()
     window.setAttribute(Qt.WA_DontShowOnScreen, True)

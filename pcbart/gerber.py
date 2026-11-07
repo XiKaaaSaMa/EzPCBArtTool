@@ -379,7 +379,7 @@ def export_gerber(
     """
     from .design_layers import LAYERS
     from .export import WRITABLE_KINDS, build_copper
-    from .validation import check_outline, warning_sentence
+    from .validation import check_outline, raise_for_errors, warning_sentence
 
     if not board.outline_ready:
         raise ValueError("尚未设置板框：请先打开「板框设置」确定板框形状")
@@ -400,6 +400,9 @@ def export_gerber(
             + str(board.standee_error)
             + "。请在「板框设置 → 立牌设置」里调整插舌位置或尺寸。"
         )
+
+    outline_report = check_outline(points)
+    raise_for_errors(outline_report, "板框无法导出")
 
     directory = Path(output_dir)
     directory.mkdir(parents=True, exist_ok=True)
@@ -501,8 +504,6 @@ def export_gerber(
     # not left on the validation object. A board with a 0.15 mm neck used to
     # export with no mention of it at all -- see
     # :func:`pcbart.validation.warning_sentence`.
-    outline_report = check_outline(points)
-
     archive_path = None
     if archive:
         name = (title.strip() or "ArtBoard").replace("/", "_").replace("\\", "_")
@@ -578,6 +579,13 @@ def export_gerber_archive(
         for entry in report["files"]
     ]
     labels = "、".join(str(entry["label"]) for entry in files)
+    note = (
+        f"已打包 {len(files)} 个 Gerber 文件（{labels}）为 "
+        f"{target.name}，可直接上传嘉立创。"
+    )
+    warnings = list(report["warnings"])
+    if warnings:
+        note += " ⚠️ " + "；".join(warnings) + "。"
     return {
         "archive": str(target),
         "directory": str(target.parent),
@@ -586,11 +594,9 @@ def export_gerber_archive(
         "layers": list(report["layers"]),
         "shapes": int(report["shapes"]),
         "vertices": int(report["vertices"]),
+        "warnings": warnings,
         "bytes": target.stat().st_size,
-        "note": (
-            f"已打包 {len(files)} 个 Gerber 文件（{labels}）为 "
-            f"{target.name}，可直接上传嘉立创。"
-        ),
+        "note": note,
     }
 
 

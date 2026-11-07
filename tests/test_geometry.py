@@ -102,7 +102,10 @@ def test_path_round_trip_through_rings():
     decoded = path_to_rings(ring_to_path(ring))
     # The encoder closes the ring, so the decode comes back one vertex longer
     # with the first point repeated at the end.
-    assert decoded[0][:-1] == pytest.approx(list(ring))
+    assert len(decoded) == 1
+    assert len(decoded[0]) == len(ring) + 1
+    for actual, expected in zip(decoded[0][:-1], ring):
+        assert actual == pytest.approx(expected)
     assert decoded[0][-1] == pytest.approx(decoded[0][0])
 
 

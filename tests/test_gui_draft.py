@@ -331,6 +331,7 @@ def test_the_headless_flags_write_a_draft_and_a_gerber_set(tmp_path, monkeypatch
     process. This runs in a subprocess, which is both the only way to satisfy
     that and closer to how the packaged exe is actually exercised.
     """
+    import os
     import subprocess
 
     root = Path(__file__).resolve().parent.parent
@@ -354,6 +355,9 @@ def test_the_headless_flags_write_a_draft_and_a_gerber_set(tmp_path, monkeypatch
         cwd=str(root),
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        env={**os.environ, "PYTHONIOENCODING": "utf-8",
+             "PCBART_DRAFTS_DIR": str(tmp_path / "draft-library")},
         timeout=120,
     )
 

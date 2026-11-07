@@ -37,6 +37,8 @@ from pcbart.artboard import (  # noqa: E402
 
 cv2 = pytest.importorskip("cv2")
 
+from pcbart.image_prep import imread_unicode, imwrite_unicode  # noqa: E402
+
 
 # --------------------------------------------------------- the shared model
 
@@ -102,7 +104,11 @@ def test_a_flip_mirrors_the_artwork_inside_its_box():
         width_mm=40, height_mm=20, rotation_deg=30, flip_horizontal=True
     )
 
-    assert flipped.corners() == pytest.approx(plain.corners())
+    flipped_corners = flipped.corners()
+    plain_corners = plain.corners()
+    assert len(flipped_corners) == len(plain_corners)
+    for actual, expected in zip(flipped_corners, plain_corners):
+        assert actual == pytest.approx(expected)
 
     # The artwork's own corners, though, do move -- mirrored within that box.
     half_w, half_h = 20.0, 10.0
@@ -141,7 +147,7 @@ def glyph(tmp_path, size: int = 100) -> str:
     mask = np.full((size, size), 255, np.uint8)
     mask[15 : size // 2, 15 : size // 2] = 0
     path = tmp_path / "glyph.png"
-    cv2.imwrite(str(path), mask)
+    imwrite_unicode(path, mask)
     return str(path)
 
 
@@ -255,7 +261,7 @@ def test_the_canvas_matches_the_model_for_every_combination(tmp_path):
     path = glyph(tmp_path)
     canvas, placement = canvas_with(path)
 
-    source = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+    source = imread_unicode(path, cv2.IMREAD_GRAYSCALE)
     ys, xs = np.where(source < 128)
     height_px, width_px = source.shape[:2]
     local = (

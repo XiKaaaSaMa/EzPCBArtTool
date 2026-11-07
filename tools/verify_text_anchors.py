@@ -27,14 +27,13 @@ sys.path.insert(0, str(ROOT))
 
 from pcbart import badge_card  # noqa: E402
 from pcbart.epru import EproArchive  # noqa: E402
+from pcbart.paths import asset_root  # noqa: E402
 from tools.extract_badge_regions import _outline_boxes  # noqa: E402
 
 MIL_MM = 0.0254
 
 #: Library-relative folder holding the two blank templates.
-TEMPLATE_DIR = (
-    ROOT.parent / "PCB艺术板工具素材库" / "通行证模板源文件"
-)
+TEMPLATE_DIR = asset_root() / "通行证模板源文件"
 SMALL_CARD = "模板-精0、精1、皮肤小.epro2"
 LARGE_CARD = "模板-精2、皮肤大.epro2"
 
